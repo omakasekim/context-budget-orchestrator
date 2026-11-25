@@ -18,7 +18,7 @@
 4. **장기 프로젝트용 그래프 메모리 (`context_graph.json` + `query-graph` + `resume-context`)** — 단순 선형 Markdown 요약 대신 의존성 그래프를 역추적하여 다음 작업에 꼭 필요한 상위 노드·파일·결정사항만 `--token-budget` 한도 내로 복원하고 Git 드리프트까지 감지합니다.
 5. **대규모 스킬 라이브러리 지능형 라우팅 (`discover-skills`)** — 설치된 모든 CLI 스킬 디렉터리에서 YAML 프론트매터(`name`, `description`)만 읽어 컨텍스트 낭비 없이 현재 작업에 맞는 1~2개의 스킬을 즉시 추천합니다.
 6. **선제적 컨텍스트 예산 게이트 (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — JSONL 세션 로그에서 프로바이더의 실제 토큰 사용량을 추출하고, 반복 수정 루프·로그 비대화를 경고하며, 68% 안전 상한선과 핸드오프 전 구문/테스트 무결성을 강제합니다.
-7. **내장 보안·버그 감사 엔진 (`audit`)** — 14개 핵심 CWE 취약점/버그 클래스 정적 스캔(`scan`), 승인 범위 가드(`init-scope`), 7-질문 트리아지 게이트(`triage`), 시크릿·PII 자동 마스킹(`redact`), 원클릭 수정 태스크 자동 생성(`--create-tasks`) 및 Windows PowerShell 설치(`install.ps1`)를 지원합니다.
+7. **내장 보안·코드 감사 엔진 (`audit`)** — 30개 핵심 CWE 취약점/설정 오류 정적 스캔(`scan`) + 사용자 정의 규칙(`--rules-file`), OpenAPI 보안 계약 감사(`openapi`), 자연어 범위 지정(`--scope-nl`), SHA-256 중복 제거, 베이스라인 비교(`diff` / `--retest-new`), 컴플라이언스 매핑(OWASP Top 10 · PCI-DSS v4 · SOC 2 · ISO 27001), 7-질문 트리아지 게이트, 시크릿 마스킹, 그리고 6종 리포트(`json`, `sarif`, `html`, `junit`, `csv`, `md`)와 Windows `install.ps1`을 지원합니다.
 
 ## 지원 AI 하네스
 

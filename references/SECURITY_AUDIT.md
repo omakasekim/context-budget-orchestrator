@@ -1,48 +1,41 @@
-# Built-In Security & Bug Audit Methodology
+# Built-In Defensive Security & Code Audit Guide
 
-`scripts/budget_engine.py audit` integrates structured application-security and bug-hunting discipline directly into the orchestrator with zero external dependencies.
+`scripts/budget_engine.py audit` (backed by zero-dependency `scripts/security_audit.py`) integrates enterprise static security auditing, compliance mapping, API contract review, baseline diffing, and multi-format reporting directly into the orchestrator.
 
-## 1. Authorized Scope First (`audit --action init-scope`)
-Before scanning or testing any codebase or service, record explicit boundaries in `.agent_state/audit_scope.json`:
+## 1. Scoped Boundaries (`--scope-nl` or `init-scope`)
+Define authorized boundaries using either flags or natural language:
 ```bash
 python3 scripts/budget_engine.py audit --action init-scope \
-  --in-scope "src/,api/" \
-  --out-of-scope "tests/fixtures/,vendor/" \
-  --authorization "Internal authorized repository audit" \
-  --workspace "." --json
+  --scope-nl "only src/* api/* no tests/* no fixtures/*" \
+  --authorization "Internal authorized repository audit" --workspace "." --json
 ```
-Never test or probe targets outside authorized scope.
 
-## 2. Static Bug & Vulnerability Scan (`audit --action scan`)
-Run a zero-dependency multi-class scan covering 14 high-signal CWE classes (SQLi, Command Injection, Unsafe Deserialization, Hardcoded Secrets, SSRF, Path Traversal, XSS DOM Sinks, Weak JWT/Auth, Weak Crypto/TLS Disabled, Prototype Pollution, Permissive CORS, Debug Exposure, GraphQL Introspection, and Unsafe Eval):
-```bash
-python3 scripts/budget_engine.py audit --action scan --path "src" --save-graph --create-tasks --workspace "." --json
-```
-- `--save-graph` persists verified findings as `finding` nodes in `.agent_state/context_graph.json` linked to affected files (`AFFECTS_FILE`).
-- `--create-tasks` converts findings directly into prioritized remediation tasks in `.agent_state/schedule.json` so you can delegate or execute fixes inside token-safe batches.
-
-## 3. Seven-Question Triage Gate (`audit --action triage`)
-Before reporting any finding as actionable (eliminates false positives and low-value noise), evaluate it against the 7-Question Gate:
-1. **In Scope**: Confirmed inside `.agent_state/audit_scope.json`?
-2. **Reproducible**: Minimal deterministic reproduction steps or unit test verified?
-3. **Root Cause Pinned**: Exact `file:line` and code path identified?
-4. **Real Impact**: Concrete confidentiality, integrity, availability, or correctness impact (not theoretical)?
-5. **Severity Calibrated**: `CRITICAL` / `HIGH` / `MEDIUM` / `LOW` matched to exploitability & blast radius?
-6. **Remediation Clear**: Minimal, non-breaking fix verified?
-7. **Evidence Scrubbed**: Secrets, tokens, cookies, and PII redacted before storing or sharing?
+## 2. 30-Rule Static CWE Scan + Custom Rules + Multi-Format Reports (`scan`)
+Covers 30 high-signal defensive checks (SQLi, NoSQLi, Command Injection, LDAP, SSTI, XXE, Deserialization, Eval, Hardcoded Secrets, Weak JWT, Disabled TLS, Weak Crypto/PRNG, XSS DOM Sinks, Open Redirect, Path Traversal, SSRF, Prototype Pollution, Mass Assignment, IDOR hints, Wildcard CORS, Unsafe CSP, Insecure Cookies, GraphQL Introspection, Debug Mode, Docker root/`:latest`, Supply-Chain `curl|sh`, Secret Log Leakage, ReDoS, Unrestricted Upload) with automatic SHA-256 fingerprint deduplication and OWASP Top 10 / PCI-DSS v4 / SOC 2 / ISO 27001 mapping:
 
 ```bash
-python3 scripts/budget_engine.py audit --action triage \
-  --title "Unparameterized SQL query in user lookup" \
-  --severity HIGH --cwe CWE-89 --location "src/db.py:44" \
-  --poc "python3 -m pytest tests/test_sqli.py" \
-  --impact "Arbitrary read/write on users table" \
-  --remediation "Use parameterized query bindings" \
-  --in-scope-confirmed --reproducible --evidence-redacted --json
+python3 scripts/budget_engine.py audit --action scan \
+  --path "src" \
+  --rules-file "custom_rules.json" \
+  --formats "json,sarif,html,junit,csv,md" \
+  --save-graph --create-tasks --workspace "." --json
 ```
 
-## 4. Evidence Hygiene & Secret Redaction (`audit --action redact`)
-Scrub Bearer tokens, JWTs, AWS keys, GitHub PATs, private key blocks, cookies, and email addresses from logs or PoC transcripts before saving them to disk or pasting into reports:
+## 3. OpenAPI / Swagger Static Security Contract Audit (`openapi`)
+Audit API specs offline for cleartext `http://` servers, unauthenticated mutating/admin endpoints, credentials in URL query parameters, and missing requestBody schemas:
 ```bash
-cat raw_poc.log | python3 scripts/budget_engine.py audit --action redact
+python3 scripts/budget_engine.py audit --action openapi \
+  --spec "openapi.json" --formats "sarif,html,md" --workspace "." --json
 ```
+
+## 4. Baseline Scan Diffing & PR Regression Gate (`diff` & `--retest-new`)
+Compare two JSON scan baselines or scan while keeping **only** newly introduced findings:
+```bash
+python3 scripts/budget_engine.py audit --action diff --baseline baseline.json --current current.json --formats html,json
+python3 scripts/budget_engine.py audit --action scan --path "src" --retest-new baseline.json --json
+```
+
+## 5. Seven-Question Triage Gate (`triage`) & Secret Redactor (`redact`)
+- Validate findings against 7 gates (`in-scope`, `reproducible`, `root-cause pinned`, `real impact`, `severity calibrated`, `remediation clear`, `evidence redacted`).
+- Scrub secrets, JWTs, Bearer headers, cookies, private keys, and emails before saving evidence:
+  `cat raw.log | python3 scripts/budget_engine.py audit --action redact`

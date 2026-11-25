@@ -30,7 +30,7 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
-ENGINE_VERSION = "3.1.0"
+ENGINE_VERSION = "3.2.0"
 DEFAULT_CONTEXT_LIMIT = 200_000
 SAFE_UTILIZATION_RATIO = 0.68
 YELLOW_UTILIZATION_PCT = 55.0
@@ -100,6 +100,15 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "grok-code-fast": 256_000,
     "grok-3": 131_072,
     "grok-3-mini": 131_072,
+    # Local / Multi-Provider Routers (Ollama, LM Studio, Groq, Mistral, OpenRouter, LiteLLM)
+    "llama-3.3": 128_000,
+    "llama3.3": 128_000,
+    "qwen-2.5-coder": 128_000,
+    "qwen2.5-coder": 128_000,
+    "qwen3": 128_000,
+    "mistral-large": 128_000,
+    "codestral": 256_000,
+    "gemma3": 128_000,
 }
 
 SPECIALIST_ROLES: Dict[str, str] = {
@@ -2641,12 +2650,20 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
             return f"[audit:triage] {data['verdict']} ({data['passed_gates']}/7 gates) | {data['severity']} {data['cwe']} @ {data['location']}"
         if act == "init-scope":
             return f"[audit:init-scope] Saved scope boundary: {data['scope_path']}"
+        if act == "diff":
+            return (
+                f"[audit:diff] new={data['new_count']} fixed={data['fixed_count']} persisting={data['persisting_count']} "
+                f"regression={data['regression_detected']}"
+            )
         lines = [
-            f"[audit:scan] {data['total_findings']} finding(s) across {data['files_scanned']} file(s) "
-            f"(CRITICAL={data['by_severity']['CRITICAL']}, HIGH={data['by_severity']['HIGH']}, MEDIUM={data['by_severity']['MEDIUM']}, LOW={data['by_severity']['LOW']})"
+            f"[audit:{act}] {data['total_findings']} finding(s) "
+            f"(CRITICAL={data['by_severity']['CRITICAL']}, HIGH={data['by_severity']['HIGH']}, "
+            f"MEDIUM={data['by_severity']['MEDIUM']}, LOW={data['by_severity']['LOW']})"
         ]
-        for f in data["findings"][:15]:
+        for f in data.get("findings", [])[:15]:
             lines.append(f"  - [{f['severity']}] {f['cwe']} {f['rule_id']} @ {f['file']}:{f['line']} — {f['remediation']}")
+        if data.get("exported_reports"):
+            lines.append(f"  reports: {', '.join(f'{k}={v}' for k, v in data['exported_reports'].items())}")
         return "\n".join(lines)
 
     if command == "status":
@@ -2666,163 +2683,46 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
 
 
 # ---------------------------------------------------------------------------
-# Subcommand 17: audit (Zero-Dep Security/Bug Scanner, 7-Q Triage, Redactor & Scope)
+# Subcommand 17: audit (Delegates to modular zero-dep scripts/security_audit.py)
 # ---------------------------------------------------------------------------
 
-AUDIT_RULES: List[Dict[str, Any]] = [
-    {
-        "id": "SQLI-INTERP",
-        "cwe": "CWE-89",
-        "severity": "CRITICAL",
-        "pattern": re.compile(r"""(?:execute|query)\s*\(\s*(?:f["']|["'][^"']*["']\s*(?:\+|%|\.format))""", re.IGNORECASE),
-        "title": "Potential SQL Injection via string interpolation",
-        "remediation": "Use parameterized SQL placeholders instead of formatting variables directly into queries.",
-    },
-    {
-        "id": "CMDI-SHELL",
-        "cwe": "CWE-78",
-        "severity": "CRITICAL",
-        "pattern": re.compile(r"""(?:subprocess\.(?:run|Popen|call)\([^)]*shell\s*=\s*True|os\.system\s*\(|child_process\.exec\s*\()"""),
-        "title": "Potential Command Injection via shell invocation",
-        "remediation": "Pass argument arrays with shell=False (or execFile) and strictly validate untrusted input.",
-    },
-    {
-        "id": "DESER-UNSAFE",
-        "cwe": "CWE-502",
-        "severity": "CRITICAL",
-        "pattern": re.compile(r"""(?:pickle\.loads?\s*\(|yaml\.load\s*\([^)]*(?!SafeLoader)\)|marshal\.loads?\s*\()"""),
-        "title": "Unsafe deserialization of potentially untrusted data",
-        "remediation": "Use json.loads or yaml.safe_load instead of pickle/unsafe yaml.load.",
-    },
-    {
-        "id": "EVAL-DYNAMIC",
-        "cwe": "CWE-95",
-        "severity": "HIGH",
-        "pattern": re.compile(r"""(?<!\w)(?:eval|exec)\s*\([^"'\n]*[a-zA-Z_]"""),
-        "title": "Dynamic code execution via eval()/exec()",
-        "remediation": "Replace eval/exec with ast.literal_eval or an explicit allowlisted parser.",
-    },
-    {
-        "id": "SECRET-HARDCODED",
-        "cwe": "CWE-798",
-        "severity": "CRITICAL",
-        "pattern": re.compile(r"""(?:AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"""),
-        "title": "Hardcoded credential or private key material",
-        "remediation": "Revoke the credential immediately and inject secrets via environment variables or a secret manager.",
-    },
-    {
-        "id": "JWT-UNVERIFIED",
-        "cwe": "CWE-347",
-        "severity": "HIGH",
-        "pattern": re.compile(r"""(?:verify_signature["']?\s*[:=]\s*False|algorithms\s*=\s*\[[^\]]*["']none["']|jwt\.decode\([^)]*verify\s*=\s*False)""", re.IGNORECASE),
-        "title": "JWT signature verification disabled or 'none' algorithm permitted",
-        "remediation": "Enforce strict signature verification with pinned asymmetric/HMAC algorithms (e.g. RS256).",
-    },
-    {
-        "id": "TLS-DISABLED",
-        "cwe": "CWE-295",
-        "severity": "HIGH",
-        "pattern": re.compile(r"""(?:verify\s*=\s*False|rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true)"""),
-        "title": "TLS certificate verification disabled",
-        "remediation": "Enable TLS certificate verification and pin trusted CA roots in production.",
-    },
-    {
-        "id": "XSS-DOM-SINK",
-        "cwe": "CWE-79",
-        "severity": "HIGH",
-        "pattern": re.compile(r"""(?:dangerouslySetInnerHTML|\.innerHTML\s*=|document\.write\s*\(|v-html\s*=)"""),
-        "title": "Unsanitized HTML DOM injection sink",
-        "remediation": "Use textContent/React JSX escaping or sanitize strictly with DOMPurify before rendering HTML.",
-    },
-    {
-        "id": "PATH-TRAVERSAL",
-        "cwe": "CWE-22",
-        "severity": "HIGH",
-        "pattern": re.compile(r"""(?:open|readFile|readFileSync|send_file)\s*\([^)]*(?:req\.|request\.|params\[|query\[)"""),
-        "title": "Potential Path Traversal from request-controlled filename",
-        "remediation": "Resolve canonical paths with Path.resolve() and assert the target stays inside an allowed base directory.",
-    },
-    {
-        "id": "SSRF-DYNAMIC-URL",
-        "cwe": "CWE-918",
-        "severity": "MEDIUM",
-        "pattern": re.compile(r"""(?:requests\.(?:get|post|request)|urllib\.request\.urlopen|fetch)\s*\([^)]*(?:req\.|request\.|user_url|target_url|redirect_url)"""),
-        "title": "Potential Server-Side Request Forgery (SSRF) on user-supplied URL",
-        "remediation": "Validate URL scheme/host against an explicit allowlist and block private/metadata IP ranges.",
-    },
-    {
-        "id": "CRYPTO-WEAK",
-        "cwe": "CWE-327",
-        "severity": "MEDIUM",
-        "pattern": re.compile(r"""(?:hashlib\.(?:md5|sha1)\s*\(|crypto\.createHash\(['"](?:md5|sha1)['"]\))"""),
-        "title": "Weak cryptographic hash (MD5/SHA-1)",
-        "remediation": "Use SHA-256/BLAKE2b for integrity checks and Argon2/scrypt/bcrypt for password hashing.",
-    },
-    {
-        "id": "PROTO-POLLUTION",
-        "cwe": "CWE-1321",
-        "severity": "MEDIUM",
-        "pattern": re.compile(r"""(?:__proto__|constructor\.prototype)"""),
-        "title": "Prototype pollution vector detected",
-        "remediation": "Reject '__proto__', 'constructor', and 'prototype' keys during object merges or use Object.create(null).",
-    },
-    {
-        "id": "CORS-WILDCARD",
-        "cwe": "CWE-942",
-        "severity": "MEDIUM",
-        "pattern": re.compile(r"""Access-Control-Allow-Origin["']?\s*[:=]\s*["']\*["']"""),
-        "title": "Permissive wildcard CORS header",
-        "remediation": "Restrict Access-Control-Allow-Origin to explicit trusted origins, especially when credentials are sent.",
-    },
-    {
-        "id": "DEBUG-ENABLED",
-        "cwe": "CWE-489",
-        "severity": "LOW",
-        "pattern": re.compile(r"""(?:\bDEBUG\s*=\s*True\b|app\.run\([^)]*debug\s*=\s*True)"""),
-        "title": "Debug mode enabled in source code",
-        "remediation": "Drive debug mode from environment variables defaulting to False in production.",
-    },
-]
-
-REDACT_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_GH_TOKEN]"),
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "[REDACTED_JWT]"),
-    (re.compile(r"(?i)(Authorization\s*:\s*Bearer\s+)[^\s\"']+"), r"\1[REDACTED_TOKEN]"),
-    (re.compile(r"(?i)(Cookie\s*:\s*)[^\r\n]+"), r"\1[REDACTED_COOKIE]"),
-    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
-]
-
-SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-
-
-def redact_sensitive_text(text: str) -> Tuple[str, int]:
-    redacted = text
-    total_hits = 0
-    for pat, repl in REDACT_PATTERNS:
-        redacted, count = pat.subn(repl, redacted)
-        total_hits += count
-    return redacted, total_hits
+def _load_security_audit_module():
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import security_audit  # type: ignore
+    return security_audit
 
 
 def cmd_audit(args: argparse.Namespace) -> Dict[str, Any]:
+    sa = _load_security_audit_module()
     workspace = Path(args.workspace).expanduser().resolve()
     action = args.action
+    report_dir = _resolve_workspace_path(workspace, args.report_dir) if args.report_dir else (_state_dir(workspace) / "reports")
+    formats = [f.strip() for f in (args.formats or "").split(",") if f.strip()]
 
     if action == "redact":
         raw = Path(args.file).expanduser().read_text(encoding="utf-8", errors="replace") if args.file else sys.stdin.read()
-        redacted, count = redact_sensitive_text(raw)
+        redacted, count = sa.redact_sensitive_text(raw)
         return {"action": "redact", "redactions_applied": count, "redacted_text": redacted}
 
     if action == "init-scope":
+        if args.scope_nl:
+            parsed = sa.parse_nl_scope(args.scope_nl)
+            in_scope = parsed["in_scope"]
+            out_of_scope = parsed["out_of_scope"]
+            hosts = parsed["hosts"]
+        else:
+            in_scope = [s.strip() for s in (args.in_scope or ".").split(",") if s.strip()]
+            out_of_scope = [s.strip() for s in (args.out_of_scope or "").split(",") if s.strip()]
+            hosts = []
         scope_doc = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": utc_now_iso(),
             "authorization": args.authorization or "Authorized local repository audit",
-            "in_scope": [s.strip() for s in (args.in_scope or ".").split(",") if s.strip()],
-            "out_of_scope": [s.strip() for s in (args.out_of_scope or "").split(",") if s.strip()],
+            "in_scope": in_scope,
+            "out_of_scope": out_of_scope,
+            "hosts": hosts,
         }
         scope_path = _save_json_file(_state_dir(workspace) / "audit_scope.json", scope_doc)
         return {"action": "init-scope", "scope_path": str(scope_path), "scope": scope_doc}
@@ -2833,14 +2733,14 @@ def cmd_audit(args: argparse.Namespace) -> Dict[str, Any]:
             "2_reproducible": bool(args.reproducible and (args.poc or "").strip()),
             "3_root_cause_pinned": bool((args.location or "").strip()),
             "4_real_impact": bool((args.impact or "").strip()),
-            "5_severity_calibrated": (args.severity or "").upper() in SEVERITY_RANK,
+            "5_severity_calibrated": (args.severity or "").upper() in sa.SEVERITY_RANK,
             "6_remediation_clear": bool((args.remediation or "").strip()),
             "7_evidence_redacted": bool(args.evidence_redacted),
         }
         passed = sum(1 for v in gates.values() if v)
         missing = [k for k, v in gates.items() if not v]
         verdict = "VALID_FINDING" if passed == 7 else "NEEDS_EVIDENCE"
-        safe_poc, _ = redact_sensitive_text(args.poc or "")
+        safe_poc, _ = sa.redact_sensitive_text(args.poc or "")
         report_md = (
             f"### [{(args.severity or 'MEDIUM').upper()}] {args.title or 'Untitled Finding'} ({args.cwe or 'CWE-TBD'})\n"
             f"- **Verdict:** `{verdict}` ({passed}/7 triage gates passed)\n"
@@ -2861,69 +2761,81 @@ def cmd_audit(args: argparse.Namespace) -> Dict[str, Any]:
             "report_markdown": report_md,
         }
 
+    if action == "diff":
+        if not args.baseline or not args.current:
+            raise ValueError("audit --action diff requires both --baseline and --current JSON files.")
+        base_doc = json.loads(Path(args.baseline).expanduser().read_text(encoding="utf-8"))
+        curr_doc = json.loads(Path(args.current).expanduser().read_text(encoding="utf-8"))
+        diff_res = sa.diff_scans(base_doc.get("findings", []), curr_doc.get("findings", []))
+        exported: Dict[str, str] = {}
+        if formats:
+            synth = {
+                "scanned_at": utc_now_iso(),
+                "total_findings": diff_res["new_count"],
+                "by_severity": {
+                    sev: sum(1 for f in diff_res["new_findings"] if f.get("severity") == sev)
+                    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+                },
+                "findings": diff_res["new_findings"],
+            }
+            exported = sa.export_reports(synth, formats, report_dir, prefix="audit_diff")
+        return {"action": "diff", **diff_res, "exported_reports": exported}
+
+    if action == "openapi":
+        if not args.spec:
+            raise ValueError("audit --action openapi requires --spec <path-to-openapi.json>.")
+        spec_path = _resolve_workspace_path(workspace, args.spec)
+        res = sa.audit_openapi_spec(spec_path)
+        exported = sa.export_reports(res, formats, report_dir, prefix="openapi_audit") if formats else {}
+        return {"action": "openapi", **res, "exported_reports": exported}
+
     if action == "scan":
         scan_root = _resolve_workspace_path(workspace, args.path or ".")
         if not scan_root.exists():
             raise ValueError(f"Scan path does not exist: {scan_root}")
 
         scope_doc = _load_json_file(_state_dir(workspace) / "audit_scope.json") or {}
-        excluded_prefixes = [p.rstrip("/") for p in scope_doc.get("out_of_scope", []) if p.strip()]
-
-        files_to_scan: List[Path] = []
-        if scan_root.is_file():
-            files_to_scan.append(scan_root)
+        if args.scope_nl:
+            parsed = sa.parse_nl_scope(args.scope_nl)
+            in_scope = parsed["in_scope"]
+            out_of_scope = parsed["out_of_scope"]
         else:
-            for root, dirs, files in os.walk(scan_root):
-                dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRS)
-                for fn in sorted(files):
-                    fp = Path(root) / fn
-                    if fp.suffix.lower() in CODE_EXTENSIONS or fp.suffix.lower() in (".yml", ".yaml", ".json", ".env", ".sh", ".sql", ".html"):
-                        if not is_binary_file(fp):
-                            files_to_scan.append(fp)
+            in_scope = scope_doc.get("in_scope", ["."])
+            out_of_scope = scope_doc.get("out_of_scope", [])
 
-        findings: List[Dict[str, Any]] = []
-        by_sev = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        files_scanned = 0
+        custom_rules = sa.load_custom_rules(args.rules_file)
+        scan_res = sa.scan_workspace(
+            workspace=workspace,
+            scan_root=scan_root,
+            in_scope=in_scope,
+            out_of_scope=out_of_scope,
+            custom_rules=custom_rules,
+        )
 
-        for fp in files_to_scan:
-            rel = fp.relative_to(workspace).as_posix() if workspace in fp.parents or fp == workspace else str(fp)
-            if any(rel == ex or rel.startswith(ex + "/") for ex in excluded_prefixes):
-                continue
-            files_scanned += 1
-            try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for lineno, line in enumerate(lines, start=1):
-                stripped = line.strip()
-                if not stripped or stripped.startswith(("#", "//", "/*", "*")):
-                    continue
-                for rule in AUDIT_RULES:
-                    if rule["pattern"].search(line):
-                        snippet, _ = redact_sensitive_text(stripped[:140])
-                        findings.append(
-                            {
-                                "id": f"FND-{len(findings) + 1:03d}",
-                                "rule_id": rule["id"],
-                                "cwe": rule["cwe"],
-                                "severity": rule["severity"],
-                                "title": rule["title"],
-                                "file": rel,
-                                "line": lineno,
-                                "snippet": snippet,
-                                "remediation": rule["remediation"],
-                            }
-                        )
-                        by_sev[rule["severity"]] += 1
+        # Optional --retest-new baseline filter (keeps ONLY newly introduced findings)
+        retest_summary: Optional[Dict[str, Any]] = None
+        if args.retest_new:
+            base_doc = json.loads(Path(args.retest_new).expanduser().read_text(encoding="utf-8"))
+            d = sa.diff_scans(base_doc.get("findings", []), scan_res["findings"])
+            retest_summary = {
+                "baseline_count": d["baseline_count"],
+                "fixed_count": d["fixed_count"],
+                "persisting_suppressed": d["persisting_count"],
+            }
+            scan_res["findings"] = d["new_findings"]
+            scan_res["total_findings"] = len(d["new_findings"])
+            scan_res["by_severity"] = {
+                sev: sum(1 for f in d["new_findings"] if f.get("severity") == sev)
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+            }
+            scan_res["compliance_summary"] = sa.summarize_compliance(d["new_findings"])
 
-        findings.sort(key=lambda f: (SEVERITY_RANK.get(f["severity"], 9), f["file"], f["line"]))
-
+        findings = scan_res["findings"]
         graph_path_str: Optional[str] = None
         if args.save_graph or args.create_tasks:
             schedule = _load_schedule(workspace) or _default_schedule(workspace)
-            # Record findings into schedule memories as kind="risk" so context_graph links them directly to affected files
             memories = [m for m in schedule.get("memories", []) if not str(m.get("id", "")).startswith("FND-")]
-            for f in findings[:25]:
+            for f in findings[:30]:
                 memories.append(
                     {
                         "id": f["id"],
@@ -2969,14 +2881,14 @@ def cmd_audit(args: argparse.Namespace) -> Dict[str, Any]:
             )
             created_tasks_count = len(rem_tasks)
 
+        exported = sa.export_reports(scan_res, formats, report_dir, prefix="audit_report") if formats else {}
         return {
             "action": "scan",
-            "files_scanned": files_scanned,
-            "total_findings": len(findings),
-            "by_severity": by_sev,
-            "findings": findings,
+            **scan_res,
+            "retest_new_summary": retest_summary,
             "graph_path": graph_path_str,
             "remediation_tasks_created": created_tasks_count,
+            "exported_reports": exported,
         }
 
     raise ValueError(f"Unsupported audit action: {action}")
@@ -3148,11 +3060,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_st.add_argument("--workspace", default=".")
     p_st.add_argument("--json", action="store_true")
 
-    # 17. audit (static CWE bug/security scan, 7-Q triage gate, redactor, scope)
-    p_aud = sub.add_parser("audit", help="Zero-dep security/bug scanner, 7-Question triage gate, secret redactor, and scope guard.")
-    p_aud.add_argument("--action", required=True, choices=["scan", "triage", "redact", "init-scope"])
+    # 17. audit (30 CWE static scan, OpenAPI contract audit, baseline diff, 7-Q triage, redactor, compliance, SARIF/HTML/JUnit/CSV)
+    p_aud = sub.add_parser("audit", help="Enterprise zero-dep security audit: 30 CWE rules, OpenAPI audit, compliance, diff, SARIF/HTML/JUnit/CSV.")
+    p_aud.add_argument("--action", required=True, choices=["scan", "openapi", "diff", "triage", "redact", "init-scope"])
     p_aud.add_argument("--path", default=".")
     p_aud.add_argument("--file", default=None)
+    p_aud.add_argument("--spec", default=None, help="Path to OpenAPI/Swagger JSON spec for --action openapi.")
+    p_aud.add_argument("--rules-file", default=None, help="Path to custom JSON audit rules.")
+    p_aud.add_argument("--scope-nl", default="", help="Natural-language scope e.g. 'only src/* no tests/*'.")
+    p_aud.add_argument("--baseline", default=None, help="Baseline JSON report for --action diff.")
+    p_aud.add_argument("--current", default=None, help="Current JSON report for --action diff.")
+    p_aud.add_argument("--retest-new", default=None, help="Baseline JSON to filter only new findings during scan.")
+    p_aud.add_argument("--formats", default="", help="Comma-separated export formats: json,sarif,html,junit,csv,md")
+    p_aud.add_argument("--report-dir", default=None, help="Directory for exported reports (default: .agent_state/reports).")
     p_aud.add_argument("--save-graph", action="store_true")
     p_aud.add_argument("--create-tasks", action="store_true")
     p_aud.add_argument("--model", default=None)

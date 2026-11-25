@@ -341,6 +341,140 @@ class FlagshipV3OrchestratorTests(unittest.TestCase):
         self.assertNotIn("AKIA1234567890ABCDEF", red["redacted_text"])
         self.assertNotIn("alice@corp.io", red["redacted_text"])
 
+    def test_08_openapi_compliance_nl_scope_custom_rules_diff_and_reports(self) -> None:
+        # 1. Custom rule + NL scope + deduplication + multi-format exports (JSON/SARIF/HTML/JUnit/CSV/MD)
+        src = self.workspace / "api"
+        src.mkdir()
+        (src / "handler.py").write_text(
+            "import hashlib\n"
+            "def f1():\n"
+            "    h = hashlib.md5(b'a')\n"
+            "    h = hashlib.md5(b'a')\n"  # identical snippet triggers fingerprint dedupe
+            "    return h\n"
+            "def f3(): return LEGACY_UNSAFE_CALL()\n",
+            encoding="utf-8",
+        )
+        skip_dir = self.workspace / "ignored_dir"
+        skip_dir.mkdir()
+        (skip_dir / "skip.py").write_text("eval(x)\n", encoding="utf-8")
+
+        custom_rules = self.workspace / "custom_rules.json"
+        custom_rules.write_text(
+            json.dumps([{"id": "CUSTOM-LEGACY", "cwe": "CWE-477", "severity": "HIGH", "pattern": "LEGACY_UNSAFE_CALL", "title": "Legacy unsafe helper"}]),
+            encoding="utf-8",
+        )
+
+        rc, scan1 = self._run_cli(
+            "audit",
+            "--action",
+            "scan",
+            "--path",
+            ".",
+            "--scope-nl",
+            "only api/* no ignored_dir/*",
+            "--rules-file",
+            str(custom_rules),
+            "--formats",
+            "json,sarif,html,junit,csv,md",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(scan1["rules_evaluated"], 31)
+        self.assertGreaterEqual(scan1["duplicates_collapsed"], 1)
+        self.assertTrue(any(f["rule_id"] == "CUSTOM-LEGACY" for f in scan1["findings"]))
+        self.assertIn("owasp", scan1["compliance_summary"])
+        self.assertIn("pci_dss", scan1["compliance_summary"])
+        self.assertIn("soc2", scan1["compliance_summary"])
+        self.assertIn("iso27001", scan1["compliance_summary"])
+
+        # Verify all 6 exported report formats exist and parse cleanly
+        reports = scan1["exported_reports"]
+        for fmt in ("json", "sarif", "html", "junit", "csv", "md"):
+            self.assertIn(fmt, reports)
+            self.assertTrue(Path(reports[fmt]).is_file())
+        sarif_doc = json.loads(Path(reports["sarif"]).read_text(encoding="utf-8"))
+        self.assertEqual(sarif_doc["version"], "2.1.0")
+        self.assertIn("<testsuite", Path(reports["junit"]).read_text(encoding="utf-8"))
+        self.assertIn("Compliance Audit Report", Path(reports["html"]).read_text(encoding="utf-8"))
+
+        # 2. Baseline diffing & --retest-new regression filter
+        baseline_path = Path(reports["json"])
+        (src / "handler.py").write_text(
+            (src / "handler.py").read_text(encoding="utf-8") + "DEBUG = True\n",
+            encoding="utf-8",
+        )
+        rc, retest = self._run_cli(
+            "audit",
+            "--action",
+            "scan",
+            "--path",
+            ".",
+            "--scope-nl",
+            "only api/* no ignored_dir/*",
+            "--rules-file",
+            str(custom_rules),
+            "--retest-new",
+            str(baseline_path),
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(retest["total_findings"], 1)
+        self.assertEqual(retest["findings"][0]["rule_id"], "DEBUG-ENABLED")
+
+        curr_path = self.workspace / "current_scan.json"
+        curr_path.write_text(json.dumps(retest), encoding="utf-8")
+        rc, diff_out = self._run_cli(
+            "audit",
+            "--action",
+            "diff",
+            "--baseline",
+            str(baseline_path),
+            "--current",
+            str(curr_path),
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(diff_out["regression_detected"])
+        self.assertEqual(diff_out["new_count"], 1)
+
+        # 3. OpenAPI static contract audit
+        spec_path = self.workspace / "openapi.json"
+        spec_path.write_text(
+            json.dumps(
+                {
+                    "openapi": "3.0.3",
+                    "servers": [{"url": "http://api.example.com"}],
+                    "paths": {
+                        "/admin/users": {
+                            "post": {
+                                "parameters": [{"name": "api_key", "in": "query"}],
+                                "requestBody": {"content": {"application/json": {}}},
+                            }
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        rc, oapi = self._run_cli(
+            "audit",
+            "--action",
+            "openapi",
+            "--spec",
+            str(spec_path),
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        rule_ids = {f["rule_id"] for f in oapi["findings"]}
+        self.assertIn("OPENAPI-CLEARTEXT-SERVER", rule_ids)
+        self.assertIn("OPENAPI-UNAUTH-ENDPOINT", rule_ids)
+        self.assertIn("OPENAPI-SECRET-IN-QUERY", rule_ids)
+        self.assertIn("OPENAPI-MISSING-SCHEMA", rule_ids)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

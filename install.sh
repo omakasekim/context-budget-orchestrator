@@ -121,6 +121,7 @@ copy_skill_payload() {
     fi
   done
   cp "$SCRIPT_DIR/scripts/budget_engine.py" "$dest/scripts/budget_engine.py"
+  cp "$SCRIPT_DIR/scripts/security_audit.py" "$dest/scripts/security_audit.py"
   cp "$SCRIPT_DIR/scripts/hook_adapter.py" "$dest/scripts/hook_adapter.py"
   cp "$SCRIPT_DIR/scripts/test_budget_engine.py" "$dest/scripts/test_budget_engine.py"
   cp "$SCRIPT_DIR/references/WORKLOG_TEMPLATE.md" "$dest/references/WORKLOG_TEMPLATE.md"

@@ -60,7 +60,7 @@ python3 "$ENGINE" gate-check --task-id "<task_id>" --model "<active-model>" --us
   python3 "$ENGINE" exec-task --task-id "<task_id>" --cmd "<build-or-test-cmd>" --workspace "." --json
   ```
 - Complete the task lease when verified: `lease --action complete --task-id "<task_id>" --agent-id "<agent_id>"`.
-- For security/bug audits, define scope (`audit --action init-scope`), run the zero-dep 14-CWE scanner (`audit --action scan --save-graph --create-tasks`), validate findings with the 7-Question Triage Gate (`audit --action triage`), and scrub tokens/PII with `audit --action redact` (see `references/SECURITY_AUDIT.md`).
+- For security/bug audits, use `audit` (`init-scope` / `--scope-nl`, 30-CWE `scan` + `--rules-file` + `--retest-new` + `--formats json,sarif,html,junit,csv,md`, `openapi` contract audit, `diff`, 7-Question `triage`, and `redact`; see `references/SECURITY_AUDIT.md`).
 
 ### 5. Pre-Flight Verify & Graph-First Atomic Handoff (Multi-Hour Continuity)
 Whenever `status == "CRITICAL_HANDOFF"` (>68% used or <25,000 remaining), `gate-check` halts, or Batch 1 finishes while Batch 2+ remains:
