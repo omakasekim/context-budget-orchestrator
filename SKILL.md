@@ -60,6 +60,7 @@ python3 "$ENGINE" gate-check --task-id "<task_id>" --model "<active-model>" --us
   python3 "$ENGINE" exec-task --task-id "<task_id>" --cmd "<build-or-test-cmd>" --workspace "." --json
   ```
 - Complete the task lease when verified: `lease --action complete --task-id "<task_id>" --agent-id "<agent_id>"`.
+- For security/bug audits, define scope (`audit --action init-scope`), run the zero-dep 14-CWE scanner (`audit --action scan --save-graph --create-tasks`), validate findings with the 7-Question Triage Gate (`audit --action triage`), and scrub tokens/PII with `audit --action redact` (see `references/SECURITY_AUDIT.md`).
 
 ### 5. Pre-Flight Verify & Graph-First Atomic Handoff (Multi-Hour Continuity)
 Whenever `status == "CRITICAL_HANDOFF"` (>68% used or <25,000 remaining), `gate-check` halts, or Batch 1 finishes while Batch 2+ remains:
@@ -75,4 +76,4 @@ On `"resume worklog"` (or whenever `.agent_state/context_graph.json` exists):
 
 ## References
 - Engine: `scripts/budget_engine.py` · Hooks: `scripts/hook_adapter.py` · Tests: `scripts/test_budget_engine.py`
-- Docs: `references/ARCHITECTURE.md`, `references/HOOKS.md`, `references/PROMPT_RECIPES.md`, `references/WORKLOG_TEMPLATE.md`
+- Docs: `references/ARCHITECTURE.md`, `references/HOOKS.md`, `references/PROMPT_RECIPES.md`, `references/SECURITY_AUDIT.md`, `references/WORKLOG_TEMPLATE.md`

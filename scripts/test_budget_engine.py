@@ -247,6 +247,100 @@ class FlagshipV3OrchestratorTests(unittest.TestCase):
         hook_resp = json.loads(hook_proc.stdout)
         self.assertEqual(hook_resp["status"], "CRITICAL_HANDOFF")
 
+    def test_07_security_bug_audit_triage_redact_and_scope(self) -> None:
+        # 1. Scope guard
+        rc, sc = self._run_cli(
+            "audit",
+            "--action",
+            "init-scope",
+            "--in-scope",
+            "src/",
+            "--out-of-scope",
+            "fixtures/",
+            "--authorization",
+            "Authorized repo audit",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(Path(sc["scope_path"]).is_file())
+
+        # 2. Vulnerable source file vs excluded fixture file
+        src = self.workspace / "src"
+        src.mkdir()
+        (src / "vuln.py").write_text(
+            "import subprocess, pickle\n"
+            "def run(cmd, uid, blob):\n"
+            "    cursor.execute(f'SELECT * FROM users WHERE id={uid}')\n"
+            "    subprocess.run(cmd, shell=True)\n"
+            "    return pickle.loads(blob)\n",
+            encoding="utf-8",
+        )
+        fix = self.workspace / "fixtures"
+        fix.mkdir()
+        (fix / "ignored.py").write_text("eval(user_data)\n", encoding="utf-8")
+
+        rc, scan = self._run_cli(
+            "audit",
+            "--action",
+            "scan",
+            "--path",
+            ".",
+            "--save-graph",
+            "--create-tasks",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(scan["total_findings"], 3)
+        self.assertEqual(scan["by_severity"]["CRITICAL"], 3)
+        # Excluded fixtures/ must not be scanned
+        self.assertFalse(any("fixtures/" in f["file"] for f in scan["findings"]))
+        self.assertEqual(scan["remediation_tasks_created"], 1)
+        self.assertTrue(Path(scan["graph_path"]).is_file())
+
+        # 3. 7-Question Triage Gate (incomplete vs complete)
+        rc, need = self._run_cli("audit", "--action", "triage", "--title", "SQLi", "--severity", "CRITICAL", "--workspace", str(self.workspace))
+        self.assertEqual(rc, 0)
+        self.assertEqual(need["verdict"], "NEEDS_EVIDENCE")
+
+        rc, valid = self._run_cli(
+            "audit",
+            "--action",
+            "triage",
+            "--title",
+            "SQL Injection in user lookup",
+            "--severity",
+            "CRITICAL",
+            "--cwe",
+            "CWE-89",
+            "--location",
+            "src/vuln.py:3",
+            "--poc",
+            "pytest tests/test_sqli.py",
+            "--impact",
+            "Full database read/write",
+            "--remediation",
+            "Use parameterized queries",
+            "--in-scope-confirmed",
+            "--reproducible",
+            "--evidence-redacted",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(valid["verdict"], "VALID_FINDING")
+        self.assertEqual(valid["passed_gates"], 7)
+
+        # 4. Evidence redactor
+        raw_secret = "Authorization: Bearer supersecret123\nEmail: alice@corp.io\nKey: AKIA1234567890ABCDEF\n"
+        rc, red = self._run_cli("audit", "--action", "redact", stdin_text=raw_secret)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(red["redactions_applied"], 3)
+        self.assertNotIn("supersecret123", red["redacted_text"])
+        self.assertNotIn("AKIA1234567890ABCDEF", red["redacted_text"])
+        self.assertNotIn("alice@corp.io", red["redacted_text"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

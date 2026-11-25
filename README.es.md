@@ -18,6 +18,7 @@ Una **Agent Skill universal, sin dependencias externas y libre de sobrecarga**, 
 4. **Memoria en grafo para proyectos de larga duración (`context_graph.json` + `query-graph` + `resume-context`)** — Al reanudar una nueva sesión, carga únicamente el subgrafo relevante (con límite opcional `--token-budget`), detecta cambios externos en Git y mantiene el seguimiento de épocas de relevo.
 5. **Enrutamiento ligero para ecosistemas extensos de skills (`discover-skills`)** — Escanea solo el encabezado YAML (`name` y `description`) de cada `SKILL.md` instalado para seleccionar las 1–2 skills necesarias sin inflar el contexto.
 6. **Control proactivo del presupuesto de contexto (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — Extrae métricas reales `usage` desde sesiones JSONL, detecta bucles de edición repetitivos, descubre dependencias locales de Python/JS/TS en oleadas paralelas (`parallel_waves`), impone un **límite seguro del 68%** y verifica sintaxis/pruebas antes de cada entrega.
+7. **Motor integrado de auditoría de seguridad y bugs (`audit`)** — Escaneo estático sin dependencias de 14 clases CWE críticas (`scan`), control de alcance autorizado (`init-scope`), puerta de triaje de 7 preguntas (`triage`), anonimización automática de secretos/PII (`redact`), creación de tareas de remediación (`--create-tasks`) e instalador Windows PowerShell (`install.ps1`).
 
 ## Entornos (Harnesses) Compatibles
 

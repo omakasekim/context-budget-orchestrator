@@ -18,6 +18,7 @@
 4. **跨会话持久化图记忆（`context_graph.json` + `query-graph` + `resume-context`）** — 告别线性膨胀的纯文本日志：冷启动恢复时仅按依赖图提取下一任务必需的上游子图（支持 `--token-budget` 硬上限），同时自动检测 Git 漂移并记录交接轮次（Epoch）。
 5. **海量技能库的零膨胀路由（`discover-skills`）** — 仅扫描各 CLI 技能目录中 `SKILL.md` 的 YAML 元数据（`name` / `description`），无需把几十个完整技能塞进上下文即可精准匹配当前任务所需的 1–2 个辅助技能。
 6. **主动式上下文预算门禁（`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`）** — 解析 JSONL 会话日志中的精确供应商 `usage` 计数，预警循环修改（thrash loop）与日志膨胀；通过静态 AST/导入分析自动拆分并行波次（`parallel_waves`），严格守住 **68% 安全上限**，并在交接前校验语法与测试。
+7. **内置安全与缺陷审计引擎（`audit`）** — 零依赖静态扫描 14 类核心 CWE 安全漏洞与缺陷（`scan`），支持授权范围边界（`init-scope`）、七问分诊门禁（`triage`）、敏感凭据/PII 自动脱敏（`redact`）、一键生成修复任务（`--create-tasks`），并提供 Windows PowerShell 安装脚本（`install.ps1`）。
 
 ## 兼容的 AI 编程框架与模型
 

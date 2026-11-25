@@ -17,10 +17,12 @@ INSTALL_ROOT="${DATA_HOME}/agent-skills/${SKILL_NAME}"
 TARGETS=(
   "${HOME}/.claude/skills/${SKILL_NAME}"
   "${HOME}/.gemini/skills/${SKILL_NAME}"
+  "${HOME}/.gemini/config/skills/${SKILL_NAME}"
   "${HOME}/.agents/skills/${SKILL_NAME}"
   "${HOME}/.copilot/skills/${SKILL_NAME}"
   "${CONFIG_HOME}/opencode/skills/${SKILL_NAME}"
   "${HOME}/.openclaw/skills/${SKILL_NAME}"
+  "${HOME}/.hermes/skills/${SKILL_NAME}"
 )
 
 MODE="symlink"
@@ -113,7 +115,7 @@ PY
 copy_skill_payload() {
   local dest="$1"
   mkdir -p "$dest/scripts" "$dest/references"
-  for f in SKILL.md README.md README.ko.md README.zh.md README.es.md LICENSE install.sh; do
+  for f in SKILL.md README.md README.ko.md README.zh.md README.es.md LICENSE install.sh install.ps1; do
     if [[ -f "$SCRIPT_DIR/$f" ]]; then
       cp "$SCRIPT_DIR/$f" "$dest/$f"
     fi
@@ -125,6 +127,7 @@ copy_skill_payload() {
   cp "$SCRIPT_DIR/references/ARCHITECTURE.md" "$dest/references/ARCHITECTURE.md"
   cp "$SCRIPT_DIR/references/HOOKS.md" "$dest/references/HOOKS.md"
   cp "$SCRIPT_DIR/references/PROMPT_RECIPES.md" "$dest/references/PROMPT_RECIPES.md"
+  cp "$SCRIPT_DIR/references/SECURITY_AUDIT.md" "$dest/references/SECURITY_AUDIT.md"
   chmod +x "$dest/install.sh" "$dest/scripts/budget_engine.py" "$dest/scripts/hook_adapter.py" "$dest/scripts/test_budget_engine.py"
 }
 

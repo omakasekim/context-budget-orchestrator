@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.0](https://img.shields.io/badge/Version-3.0%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.1](https://img.shields.io/badge/Version-3.1%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![Multi-Harness](https://img.shields.io/badge/Harnesses-Claude%20%7C%20Gemini%20%7C%20Codex%20%7C%20Copilot%20%7C%20OpenClaw%20%7C%20OpenCode%20%7C%20DeepSeek%20%7C%20Grok-10B981?style=for-the-badge)](references/HOOKS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
@@ -21,6 +21,7 @@ Most GitHub orchestrator skills either bloat your system prompt with 600+ lines 
 4. **Long-Horizon Graph Memory (`context_graph.json` + `query-graph` + `resume-context`)** — Traverse upstream dependencies to load **only the pruned relevant subgraph** (under an optional `--token-budget` cap) plus git drift detection and epoch counters across hours-long multi-session work.
 5. **Work with Extensive Skill Libraries (`discover-skills`)** — Scan all installed CLI skill directories using **YAML frontmatter metadata only** to route to the exact 1–2 needed companion skills without loading 40 full skill files into context.
 6. **Proactive Context-Budget Safety (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — Extracts exact provider `usage` tokens from JSONL transcripts, flags edit thrash loops & tool bloat, auto-discovers Python/JS/TS import DAGs into file-disjoint `parallel_waves`, enforces a **68% safe ceiling**, and verifies AST syntax/tests before any handoff.
+7. **Built-In Security & Bug Audit Engine (`audit`)** — Zero-dependency static scanner across 14 CWE vulnerability/bug classes (SQLi, Command Injection, Unsafe Deserialization, Hardcoded Secrets, Weak JWT, SSRF, Path Traversal, XSS, Weak Crypto, Prototype Pollution, CORS, etc.) with authorized scope guards (`init-scope`), a 7-Question Triage Gate (`triage`), automatic secret/PII evidence redaction (`redact`), and 1-flag remediation task scheduling (`--create-tasks`).
 
 ## Supported Harnesses & Models
 
@@ -34,13 +35,19 @@ Most GitHub orchestrator skills either bloat your system prompt with 600+ lines 
 | **OpenClaw** | `~/.openclaw/skills/context-budget-orchestrator` | `~/.openclaw/sessions`, `openclaw agent run` |
 | **DeepSeek Harness (`dsh`)** | `~/.agents/skills/context-budget-orchestrator` | `deepseek-v4` (1M), `v3`/`r1`, `DEEPSEEK_SESSION`, `dsh run` |
 | **xAI Grok CLI** | `~/.agents/skills/context-budget-orchestrator` | `grok-4` (256K), `grok-code-fast`, `GROK_SESSION`, `grok -p` |
+| **Hermes Agent & Antigravity** | `~/.hermes/skills/` · `~/.gemini/config/skills/` | Auto-wired by both `install.sh` and Windows `install.ps1` |
 
 ## 1-Command Installation
 
 ```bash
 git clone https://github.com/Aetherx86/context-budget-orchestrator.git
 cd context-budget-orchestrator
+
+# macOS / Linux
 bash install.sh
+
+# Windows (PowerShell)
+pwsh ./install.ps1
 ```
 
 ### Installer Options
@@ -69,10 +76,10 @@ flowchart LR
 
 ## CLI Subcommands (`scripts/budget_engine.py` — all support `--json`)
 
-`inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
+`inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `audit` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
 
 ## Additional Docs
-- [SKILL.md](SKILL.md) · [references/ARCHITECTURE.md](references/ARCHITECTURE.md) · [references/HOOKS.md](references/HOOKS.md) · [references/PROMPT_RECIPES.md](references/PROMPT_RECIPES.md)
+- [SKILL.md](SKILL.md) · [references/ARCHITECTURE.md](references/ARCHITECTURE.md) · [references/HOOKS.md](references/HOOKS.md) · [references/SECURITY_AUDIT.md](references/SECURITY_AUDIT.md) · [references/PROMPT_RECIPES.md](references/PROMPT_RECIPES.md)
 
 ## License
 
