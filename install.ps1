@@ -47,10 +47,10 @@ function Copy-SkillPayload([string]$Dest) {
       Copy-Item -LiteralPath $src -Destination (Join-Path $Dest $f) -Force
     }
   }
-  foreach ($s in @("budget_engine.py", "security_audit.py", "hook_adapter.py", "test_budget_engine.py")) {
+  foreach ($s in @("budget_engine.py", "security_audit.py", "truth_verifier.py", "hook_adapter.py", "test_budget_engine.py")) {
     Copy-Item -LiteralPath (Join-Path $ScriptDir "scripts\$s") -Destination (Join-Path $Dest "scripts\$s") -Force
   }
-  foreach ($r in @("WORKLOG_TEMPLATE.md", "ARCHITECTURE.md", "HOOKS.md", "PROMPT_RECIPES.md", "SECURITY_AUDIT.md")) {
+  foreach ($r in @("WORKLOG_TEMPLATE.md", "ARCHITECTURE.md", "HOOKS.md", "PROMPT_RECIPES.md", "SECURITY_AUDIT.md", "TRUTH_VERIFICATION.md")) {
     Copy-Item -LiteralPath (Join-Path $ScriptDir "references\$r") -Destination (Join-Path $Dest "references\$r") -Force
   }
 }

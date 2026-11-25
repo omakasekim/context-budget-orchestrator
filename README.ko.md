@@ -19,6 +19,7 @@
 5. **대규모 스킬 라이브러리 지능형 라우팅 (`discover-skills`)** — 설치된 모든 CLI 스킬 디렉터리에서 YAML 프론트매터(`name`, `description`)만 읽어 컨텍스트 낭비 없이 현재 작업에 맞는 1~2개의 스킬을 즉시 추천합니다.
 6. **선제적 컨텍스트 예산 게이트 (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — JSONL 세션 로그에서 프로바이더의 실제 토큰 사용량을 추출하고, 반복 수정 루프·로그 비대화를 경고하며, 68% 안전 상한선과 핸드오프 전 구문/테스트 무결성을 강제합니다.
 7. **내장 보안·코드 감사 엔진 (`audit`)** — 30개 핵심 CWE 취약점/설정 오류 정적 스캔(`scan`) + 사용자 정의 규칙(`--rules-file`), OpenAPI 보안 계약 감사(`openapi`), 자연어 범위 지정(`--scope-nl`), SHA-256 중복 제거, 베이스라인 비교(`diff` / `--retest-new`), 컴플라이언스 매핑(OWASP Top 10 · PCI-DSS v4 · SOC 2 · ISO 27001), 7-질문 트리아지 게이트, 시크릿 마스킹, 그리고 6종 리포트(`json`, `sarif`, `html`, `junit`, `csv`, `md`)와 Windows `install.ps1`을 지원합니다.
+8. **실증 기반 에이전트 검증 및 중재 커널 (`verify`)** — 에이전트의 "완료" 보고를 그대로 믿지 않고 Git 이력·실제 Diff·파일시스템으로 검증합니다: 커밋 반영 여부 판정(`shipped`, 종료코드 `0`/`1`), 빈 테스트·`assert True`·스킵된 단언문 및 허위 커밋 탐지(`commit-audit`), 공회전/반복 루프 탐지(`liveness`), 멀티 에이전트 파일·의존성 중재(`arbitrate`), 사람 개입 큐(`escalate`).
 
 ## 지원 AI 하네스
 

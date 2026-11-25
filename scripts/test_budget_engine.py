@@ -475,6 +475,112 @@ class FlagshipV3OrchestratorTests(unittest.TestCase):
         self.assertIn("OPENAPI-SECRET-IN-QUERY", rule_ids)
         self.assertIn("OPENAPI-MISSING-SCHEMA", rule_ids)
 
+    def test_09_truth_verifier_shipped_commit_audit_liveness_arbitrate_and_escalate(self) -> None:
+        # Setup git repo with one real shipped commit (AUTH1) and one hollow-test commit (AUTH3)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(self.workspace), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "config", "user.name", "Dev"], cwd=str(self.workspace), check=True)
+
+        (self.workspace / "auth.py").write_text("def login(u, p):\n    return bool(u and p)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "auth.py"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "commit", "-m", "AUTH1: implement login endpoint"], cwd=str(self.workspace), check=True, capture_output=True)
+
+        # 1. verify shipped -> AUTH1 SHIPPED (exit 0), AUTH2 NOT_SHIPPED (exit 1)
+        rc1, v1 = self._run_cli("verify", "--action", "shipped", "--claim", "AUTH1", "--files", "auth.py", "--workspace", str(self.workspace))
+        self.assertEqual(rc1, 0)
+        self.assertEqual(v1["verdict"], "SHIPPED")
+
+        rc2, v2 = self._run_cli("verify", "--action", "shipped", "--claim", "AUTH2", "--workspace", str(self.workspace))
+        self.assertEqual(rc2, 1)
+        self.assertEqual(v2["verdict"], "NOT_SHIPPED")
+
+        # 2. commit-audit catches hollow assert True test
+        (self.workspace / "test_auth.py").write_text("def test_login():\n    assert True\n", encoding="utf-8")
+        subprocess.run(["git", "add", "test_auth.py"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "commit", "-m", "AUTH3: add login tests"], cwd=str(self.workspace), check=True, capture_output=True)
+
+        rc_ca, ca = self._run_cli("verify", "--action", "commit-audit", "--max-commits", "1", "--strict", "--workspace", str(self.workspace))
+        self.assertEqual(rc_ca, 1)
+        self.assertEqual(ca["unbacked_count"], 1)
+        flag_codes = {f["code"] for f in ca["results"][0]["flags"]}
+        self.assertIn("HOLLOW_ASSERT_TRUE", flag_codes)
+
+        # 3. liveness detects STALLED after 3 identical world fingerprints
+        rc_l1, l1 = self._run_cli("verify", "--action", "liveness", "--stall-threshold", "3", "--workspace", str(self.workspace))
+        rc_l2, l2 = self._run_cli("verify", "--action", "liveness", "--stall-threshold", "3", "--workspace", str(self.workspace))
+        rc_l3, l3 = self._run_cli("verify", "--action", "liveness", "--stall-threshold", "3", "--workspace", str(self.workspace))
+        self.assertEqual(rc_l1, 0)
+        self.assertEqual(l1["verdict"], "MOVING")
+        self.assertEqual(rc_l2, 0)
+        self.assertEqual(rc_l3, 1)
+        self.assertEqual(l3["verdict"], "STALLED")
+        self.assertEqual(l3["reason"], "NO_WORLD_DELTA")
+
+        # 4. arbitrate enforces active leases and shipped upstream dependencies
+        self._run_cli("lease", "--action", "claim", "--task-id", "AUTH1", "--agent-id", "worker-A", "--files", "auth.py", "--workspace", str(self.workspace))
+        rc_ref, arb_ref = self._run_cli(
+            "verify",
+            "--action",
+            "arbitrate",
+            "--agent-id",
+            "worker-B",
+            "--files",
+            "auth.py",
+            "--deps",
+            "AUTH2",
+            "--require-shipped-deps",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc_ref, 1)
+        self.assertEqual(arb_ref["verdict"], "REFUSED")
+        ref_codes = {r["code"] for r in arb_ref["refusals"]}
+        self.assertIn("LEASE_HELD_BY_OTHER", ref_codes)
+        self.assertIn("DEPENDENCY_NOT_SHIPPED", ref_codes)
+
+        rc_ok, arb_ok = self._run_cli(
+            "verify",
+            "--action",
+            "arbitrate",
+            "--agent-id",
+            "worker-B",
+            "--files",
+            "other.py",
+            "--deps",
+            "AUTH1",
+            "--require-shipped-deps",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc_ok, 0)
+        self.assertEqual(arb_ok["verdict"], "GRANTED")
+
+        # 5. escalate queue add -> list -> resolve
+        rc_e, esc = self._run_cli(
+            "verify",
+            "--action",
+            "escalate",
+            "--sub-action",
+            "add",
+            "--title",
+            "AUTH2 missing from git",
+            "--detail",
+            "Agent claimed shipped but no commit exists",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc_e, 0)
+        self.assertEqual(esc["open_count"], 1)
+        eid = esc["item"]["id"]
+
+        rc_st, st = self._run_cli("status", "--workspace", str(self.workspace))
+        self.assertEqual(rc_st, 0)
+        self.assertEqual(st["open_escalations"], 1)
+
+        rc_res, esc_res = self._run_cli("verify", "--action", "escalate", "--sub-action", "resolve", "--id", eid, "--workspace", str(self.workspace))
+        self.assertEqual(rc_res, 0)
+        self.assertTrue(esc_res["resolved"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

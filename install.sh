@@ -122,6 +122,7 @@ copy_skill_payload() {
   done
   cp "$SCRIPT_DIR/scripts/budget_engine.py" "$dest/scripts/budget_engine.py"
   cp "$SCRIPT_DIR/scripts/security_audit.py" "$dest/scripts/security_audit.py"
+  cp "$SCRIPT_DIR/scripts/truth_verifier.py" "$dest/scripts/truth_verifier.py"
   cp "$SCRIPT_DIR/scripts/hook_adapter.py" "$dest/scripts/hook_adapter.py"
   cp "$SCRIPT_DIR/scripts/test_budget_engine.py" "$dest/scripts/test_budget_engine.py"
   cp "$SCRIPT_DIR/references/WORKLOG_TEMPLATE.md" "$dest/references/WORKLOG_TEMPLATE.md"
@@ -129,7 +130,8 @@ copy_skill_payload() {
   cp "$SCRIPT_DIR/references/HOOKS.md" "$dest/references/HOOKS.md"
   cp "$SCRIPT_DIR/references/PROMPT_RECIPES.md" "$dest/references/PROMPT_RECIPES.md"
   cp "$SCRIPT_DIR/references/SECURITY_AUDIT.md" "$dest/references/SECURITY_AUDIT.md"
-  chmod +x "$dest/install.sh" "$dest/scripts/budget_engine.py" "$dest/scripts/hook_adapter.py" "$dest/scripts/test_budget_engine.py"
+  cp "$SCRIPT_DIR/references/TRUTH_VERIFICATION.md" "$dest/references/TRUTH_VERIFICATION.md"
+  chmod +x "$dest/install.sh" "$dest/scripts/budget_engine.py" "$dest/scripts/security_audit.py" "$dest/scripts/truth_verifier.py" "$dest/scripts/hook_adapter.py" "$dest/scripts/test_budget_engine.py"
 }
 
 run_doctor() {

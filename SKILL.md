@@ -61,6 +61,7 @@ python3 "$ENGINE" gate-check --task-id "<task_id>" --model "<active-model>" --us
   ```
 - Complete the task lease when verified: `lease --action complete --task-id "<task_id>" --agent-id "<agent_id>"`.
 - For security/bug audits, use `audit` (`init-scope` / `--scope-nl`, 30-CWE `scan` + `--rules-file` + `--retest-new` + `--formats json,sarif,html,junit,csv,md`, `openapi` contract audit, `diff`, 7-Question `triage`, and `redact`; see `references/SECURITY_AUDIT.md`).
+- Never trust self-reported "done" claims: verify with `verify` (`shipped` checks git ancestry exit 0/1, `commit-audit` catches hollow tests & claim-vs-diff lies, `liveness` catches spin loops, `arbitrate` enforces file/dependency locks, `escalate` queues human decisions; see `references/TRUTH_VERIFICATION.md`).
 
 ### 5. Pre-Flight Verify & Graph-First Atomic Handoff (Multi-Hour Continuity)
 Whenever `status == "CRITICAL_HANDOFF"` (>68% used or <25,000 remaining), `gate-check` halts, or Batch 1 finishes while Batch 2+ remains:
@@ -76,4 +77,4 @@ On `"resume worklog"` (or whenever `.agent_state/context_graph.json` exists):
 
 ## References
 - Engine: `scripts/budget_engine.py` · Hooks: `scripts/hook_adapter.py` · Tests: `scripts/test_budget_engine.py`
-- Docs: `references/ARCHITECTURE.md`, `references/HOOKS.md`, `references/PROMPT_RECIPES.md`, `references/SECURITY_AUDIT.md`, `references/WORKLOG_TEMPLATE.md`
+- Docs: `references/ARCHITECTURE.md`, `references/HOOKS.md`, `references/PROMPT_RECIPES.md`, `references/SECURITY_AUDIT.md`, `references/TRUTH_VERIFICATION.md`, `references/WORKLOG_TEMPLATE.md`

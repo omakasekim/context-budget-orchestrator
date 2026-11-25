@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.2](https://img.shields.io/badge/Version-3.2%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.3](https://img.shields.io/badge/Version-3.3%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![Multi-Harness](https://img.shields.io/badge/Harnesses-Claude%20%7C%20Gemini%20%7C%20Codex%20%7C%20Copilot%20%7C%20OpenClaw%20%7C%20OpenCode%20%7C%20DeepSeek%20%7C%20Grok-10B981?style=for-the-badge)](references/HOOKS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
@@ -22,6 +22,7 @@ Most GitHub orchestrator skills either bloat your system prompt with 600+ lines 
 5. **Work with Extensive Skill Libraries (`discover-skills`)** — Scan all installed CLI skill directories using **YAML frontmatter metadata only** to route to the exact 1–2 needed companion skills without loading 40 full skill files into context.
 6. **Proactive Context-Budget Safety (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — Extracts exact provider `usage` tokens from JSONL transcripts, flags edit thrash loops & tool bloat, auto-discovers Python/JS/TS import DAGs into file-disjoint `parallel_waves`, enforces a **68% safe ceiling**, and verifies AST syntax/tests before any handoff.
 7. **Built-In Defensive Security & Code Audit Engine (`audit`)** — Modular zero-dependency static scanner across **30 CWE vulnerability & misconfiguration classes** + custom JSON rules (`--rules-file`), **OpenAPI contract security audit** (`openapi`), **natural-language scope** (`--scope-nl`), **SHA-256 finding deduplication**, **baseline diffing & `--retest-new` regression gate**, **compliance crosswalk** (OWASP Top 10:2021, PCI-DSS v4.0, SOC 2 CC, ISO 27001:2022), **7-Question Triage Gate**, **secret/PII redaction**, and **6 export formats** (`json`, `sarif`, `html`, `junit`, `csv`, `md`).
+8. **Ground-Truth Agent Verification & Referee Kernel (`verify`)** — Never trust an agent's self-reported "done": adjudicates claims from real git ancestry (`shipped` — exit `0` `SHIPPED` / exit `1` `NOT_SHIPPED`), catches hollow `assert True` tests, skipped assertions & doc-only code claims (`commit-audit`), detects silent spin/oscillation loops from real workspace deltas (`liveness` — `MOVING` vs `STALLED`), arbitrates multi-agent file & shipped-dependency locks (`arbitrate` — `GRANTED` vs `REFUSED`), and queues unresolved blockers for humans (`escalate`).
 
 ## Supported Harnesses & Models
 
@@ -77,11 +78,11 @@ flowchart LR
 
 ## CLI Subcommands (`scripts/budget_engine.py` — all support `--json`)
 
-`inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `audit` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
+`inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `audit` · `verify` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
 
 ## Additional Docs
 
-- [SKILL.md](SKILL.md) · [references/ARCHITECTURE.md](references/ARCHITECTURE.md) · [references/HOOKS.md](references/HOOKS.md) · [references/SECURITY_AUDIT.md](references/SECURITY_AUDIT.md) · [references/PROMPT_RECIPES.md](references/PROMPT_RECIPES.md)
+- [SKILL.md](SKILL.md) · [references/ARCHITECTURE.md](references/ARCHITECTURE.md) · [references/HOOKS.md](references/HOOKS.md) · [references/SECURITY_AUDIT.md](references/SECURITY_AUDIT.md) · [references/TRUTH_VERIFICATION.md](references/TRUTH_VERIFICATION.md) · [references/PROMPT_RECIPES.md](references/PROMPT_RECIPES.md)
 
 ## License
 

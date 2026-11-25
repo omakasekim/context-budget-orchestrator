@@ -30,7 +30,7 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
-ENGINE_VERSION = "3.2.0"
+ENGINE_VERSION = "3.3.0"
 DEFAULT_CONTEXT_LIMIT = 200_000
 SAFE_UTILIZATION_RATIO = 0.68
 YELLOW_UTILIZATION_PCT = 55.0
@@ -2504,6 +2504,15 @@ def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
     tasks = schedule.get("tasks", [])
     completed_set = set(schedule.get("completed_task_ids", []))
     pending = [t for t in tasks if t.get("id") not in completed_set]
+    esc_path = _state_dir(workspace) / "escalations.json"
+    open_escalations = 0
+    if esc_path.is_file():
+        try:
+            loaded_esc = json.loads(esc_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_esc, list):
+                open_escalations = sum(1 for i in loaded_esc if i.get("status") == "open")
+        except (OSError, json.JSONDecodeError):
+            pass
     return {
         "engine_version": ENGINE_VERSION,
         "workspace": str(workspace),
@@ -2516,6 +2525,7 @@ def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
         "decision_count": len(schedule.get("decisions", [])),
         "memory_count": len(schedule.get("memories", [])),
         "active_leases": len(leases),
+        "open_escalations": open_escalations,
         "graph_stats": graph.get("stats", {}) if graph else {},
         "resume_pointer": schedule.get("resume_pointer", ""),
         "next_task": pending[0]["id"] if pending else None,
@@ -2642,6 +2652,28 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
             lines.append(f"  DRIFT: {d}")
         return "\n".join(lines)
 
+    if command == "verify":
+        act = data.get("action")
+        if act == "shipped":
+            sha = (data.get("witness_commit") or {}).get("short_sha", "-")
+            return f"[verify:shipped] {data['verdict']} claim={data['claim']} commit={sha} reason={data['reason']} (exit {data['exit_code']})"
+        if act == "commit-audit":
+            lines = [
+                f"[verify:commit-audit] audited={data['commits_audited']} backed={data.get('backed_count', 0)} "
+                f"suspect={data.get('suspect_count', 0)} unbacked={data.get('unbacked_count', 0)} (exit {data['exit_code']})"
+            ]
+            for r in data.get("results", []):
+                flag_txt = ", ".join(f["code"] for f in r["flags"]) or "clean"
+                lines.append(f"  - {r['sha']} [{r['verdict']} {r['score']}/100] {r['subject']} ({flag_txt})")
+            return "\n".join(lines)
+        if act == "liveness":
+            return f"[verify:liveness] {data['verdict']} reason={data['reason']} fingerprint={data['fingerprint']} stalls={data['consecutive_stalls']} (exit {data['exit_code']})"
+        if act == "arbitrate":
+            refs = ", ".join(r["code"] for r in data.get("refusals", [])) or "ok"
+            return f"[verify:arbitrate] {data['verdict']} agent={data['agent_id']} ({refs}) (exit {data['exit_code']})"
+        if act == "escalate":
+            return f"[verify:escalate:{data.get('sub_action')}] open={data.get('open_count', 0)}"
+
     if command == "audit":
         act = data.get("action")
         if act == "redact":
@@ -2673,7 +2705,7 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
             [
                 f"=== context-budget-orchestrator v{data['engine_version']} (Epoch {data['handoff_epoch']}) ===",
                 f"Budget:    {bar} {s['utilization_pct']}% {s['status']} ({s['used_tokens']:,}/{s['context_limit']:,} tok)",
-                f"Progress:  {data['completed_count']}/{data['total_tasks']} tasks | {data['decision_count']} ADRs | {data['memory_count']} memories | {data['active_leases']} leases",
+                f"Progress:  {data['completed_count']}/{data['total_tasks']} tasks | {data['decision_count']} ADRs | {data['memory_count']} memories | {data['active_leases']} leases | {data.get('open_escalations', 0)} escalations",
                 f"Graph:     {data['graph_stats'].get('node_count', 0)} nodes / {data['graph_stats'].get('edge_count', 0)} edges",
                 f"Next Task: {data['next_task'] or '(none)'} | Pointer: {data['resume_pointer'] or '(unset)'}",
             ]
@@ -2894,6 +2926,78 @@ def cmd_audit(args: argparse.Namespace) -> Dict[str, Any]:
     raise ValueError(f"Unsupported audit action: {action}")
 
 
+# ---------------------------------------------------------------------------
+# Subcommand 18: verify (Ground-Truth Git/Diff Witness, Liveness & Referee)
+# ---------------------------------------------------------------------------
+
+def _load_truth_verifier_module():
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import truth_verifier  # type: ignore
+    return truth_verifier
+
+
+def cmd_verify(args: argparse.Namespace) -> Dict[str, Any]:
+    tv = _load_truth_verifier_module()
+    workspace = Path(args.workspace).expanduser().resolve()
+    action = args.action
+
+    if action == "shipped":
+        claim = args.claim or args.task_id
+        if not claim:
+            raise ValueError("verify --action shipped requires --claim or --task-id.")
+        files = _flatten_files_arg(args.files)
+        if not files and args.task_id:
+            schedule = _load_schedule(workspace) or {}
+            t = next((x for x in schedule.get("tasks", []) if x.get("id") == args.task_id), None)
+            if t:
+                files = list(t.get("files_to_read", []))
+        return tv.verify_shipped(workspace=workspace, claim_id=claim, expected_files=files, max_commits=int(args.max_commits))
+
+    if action == "commit-audit":
+        return tv.audit_commits(workspace=workspace, rev_range=args.range, max_commits=int(args.max_commits), strict=bool(args.strict))
+
+    if action == "liveness":
+        return tv.check_liveness(workspace=workspace, state_dir=_state_dir(workspace), stall_threshold=int(args.stall_threshold))
+
+    if action == "arbitrate":
+        agent_id = (args.agent_id or "").strip()
+        if not agent_id:
+            raise ValueError("verify --action arbitrate requires --agent-id.")
+        files = _flatten_files_arg(args.files)
+        deps = [d.strip() for d in (args.deps or "").split(",") if d.strip()]
+        if args.task_id:
+            schedule = _load_schedule(workspace) or {}
+            t = next((x for x in schedule.get("tasks", []) if x.get("id") == args.task_id), None)
+            if t:
+                if not files:
+                    files = list(t.get("files_to_read", []))
+                if not deps:
+                    deps = list(t.get("dependencies", []))
+        leases = _load_leases(workspace)["active_leases"]
+        return tv.arbitrate_access(
+            workspace=workspace,
+            agent_id=agent_id,
+            files=files,
+            active_leases=leases,
+            dependencies=deps,
+            require_shipped_deps=bool(args.require_shipped_deps),
+        )
+
+    if action == "escalate":
+        return tv.manage_escalations(
+            state_dir=_state_dir(workspace),
+            sub_action=args.sub_action or "list",
+            title=args.title or "",
+            detail=args.detail or "",
+            severity=args.severity or "HIGH",
+            item_id=args.id,
+        )
+
+    raise ValueError(f"Unsupported verify action: {action}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="budget_engine.py",
@@ -3093,6 +3197,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--workspace", default=".")
     p_aud.add_argument("--json", action="store_true")
 
+    # 18. verify (ground-truth git/diff verification, hollow-test audit, liveness, arbitrate, escalate)
+    p_vf = sub.add_parser("verify", help="Verify agent claims against git/diff/filesystem witnesses with hard exit-code verdicts (0/1).")
+    p_vf.add_argument("--action", required=True, choices=["shipped", "commit-audit", "liveness", "arbitrate", "escalate"])
+    p_vf.add_argument("--claim", default=None, help="Task ID or commit claim keyword for --action shipped.")
+    p_vf.add_argument("--task-id", default=None, help="Scheduled task ID.")
+    p_vf.add_argument("--files", action="append", nargs="+", default=None)
+    p_vf.add_argument("--range", default=None, help="Git revision range e.g. BASE..HEAD for --action commit-audit.")
+    p_vf.add_argument("--max-commits", type=int, default=20)
+    p_vf.add_argument("--strict", action="store_true", help="Exit 1 if any audited commit in range is UNBACKED.")
+    p_vf.add_argument("--stall-threshold", type=int, default=3, help="Consecutive zero-delta samples before STALLED.")
+    p_vf.add_argument("--agent-id", default=None, help="Requesting worker ID for --action arbitrate.")
+    p_vf.add_argument("--deps", default="", help="Comma-separated upstream dependency IDs.")
+    p_vf.add_argument("--require-shipped-deps", action="store_true", help="Refuse arbitration if upstream deps have not shipped in git.")
+    p_vf.add_argument("--sub-action", default="list", choices=["list", "add", "resolve"])
+    p_vf.add_argument("--id", default=None, help="Escalation ID for add/resolve.")
+    p_vf.add_argument("--title", default="")
+    p_vf.add_argument("--detail", default="")
+    p_vf.add_argument("--severity", default="HIGH")
+    p_vf.add_argument("--workspace", default=".")
+    p_vf.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -3118,6 +3243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "resume-context": cmd_resume_context,
         "status": cmd_status,
         "audit": cmd_audit,
+        "verify": cmd_verify,
     }
 
     try:
@@ -3133,6 +3259,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stdout.write(json.dumps(result, indent=2) + "\n")
     else:
         sys.stdout.write(_format_human_output(args.command, result, args) + "\n")
+
+    if args.command == "verify" and isinstance(result, dict) and "exit_code" in result:
+        return int(result["exit_code"])
     return 0
 
 
