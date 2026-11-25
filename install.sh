@@ -14,18 +14,20 @@ TARGETS=(
 
 MODE="symlink"
 UNINSTALL=0
+DOCTOR=0
 
 usage() {
   cat <<EOF
 Usage: bash install.sh [OPTIONS]
 
-Install or uninstall the '${SKILL_NAME}' Agent Skill across:
+Install, verify, or uninstall the '${SKILL_NAME}' Agent Skill across:
   - Claude Code      (~/.claude/skills/${SKILL_NAME})
   - Gemini CLI       (~/.gemini/skills/${SKILL_NAME})
   - OpenAI Codex CLI (~/.agents/skills/${SKILL_NAME})
 
 Options:
   --copy        Copy files directly into each CLI skill directory instead of symlinking
+  --doctor      Run environment, installation, and unit-test diagnostics
   --uninstall   Remove installed skill files and symlinks from all target locations
   -h, --help    Show this help message
 EOF
@@ -39,6 +41,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --uninstall)
       UNINSTALL=1
+      shift
+      ;;
+    --doctor)
+      DOCTOR=1
       shift
       ;;
     -h|--help)
@@ -67,6 +73,54 @@ remove_path_safely() {
   fi
 }
 
+run_doctor() {
+  echo "=== ${SKILL_NAME} doctor ==="
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[FAIL] python3 not found in PATH" >&2
+    exit 1
+  fi
+  python3 - <<'PY'
+import sys
+ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+ok = sys.version_info >= (3, 9)
+print(f"[{'OK' if ok else 'FAIL'}] Python {ver} (requires 3.9+)")
+if not ok:
+    sys.exit(1)
+try:
+    import tiktoken  # noqa: F401
+    print("[OK] Optional tiktoken detected (exact BPE tokenizer active)")
+except ImportError:
+    print("[INFO] Optional tiktoken not installed (using calibrated stdlib estimator)")
+PY
+
+  local any_missing=0
+  for target in "${TARGETS[@]}"; do
+    if [[ -f "$target/SKILL.md" && -f "$target/scripts/budget_engine.py" ]]; then
+      echo "[OK] Installed at $target"
+    else
+      echo "[WARN] Not installed at $target"
+      any_missing=1
+    fi
+  done
+
+  local test_script="$SCRIPT_DIR/scripts/test_budget_engine.py"
+  if [[ -f "$INSTALL_ROOT/scripts/test_budget_engine.py" ]]; then
+    test_script="$INSTALL_ROOT/scripts/test_budget_engine.py"
+  fi
+  echo "Running engine self-test ($test_script)..."
+  python3 "$test_script"
+  if [[ "$any_missing" -eq 0 ]]; then
+    echo "[OK] All 3 CLI skill paths and unit tests are healthy."
+  else
+    echo "[INFO] Tests passed; run 'bash install.sh' to wire any missing CLI paths."
+  fi
+}
+
+if [[ "$DOCTOR" -eq 1 ]]; then
+  run_doctor
+  exit 0
+fi
+
 if [[ "$UNINSTALL" -eq 1 ]]; then
   echo "Uninstalling ${SKILL_NAME}..."
   for target in "${TARGETS[@]}"; do
@@ -77,7 +131,6 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   exit 0
 fi
 
-# Verify Python 3.9+ availability
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Error: python3 is required (Python 3.9+)." >&2
   exit 1
@@ -98,9 +151,13 @@ copy_skill_payload() {
   cp "$SCRIPT_DIR/LICENSE" "$dest/LICENSE"
   cp "$SCRIPT_DIR/install.sh" "$dest/install.sh"
   cp "$SCRIPT_DIR/scripts/budget_engine.py" "$dest/scripts/budget_engine.py"
+  cp "$SCRIPT_DIR/scripts/hook_adapter.py" "$dest/scripts/hook_adapter.py"
   cp "$SCRIPT_DIR/scripts/test_budget_engine.py" "$dest/scripts/test_budget_engine.py"
   cp "$SCRIPT_DIR/references/WORKLOG_TEMPLATE.md" "$dest/references/WORKLOG_TEMPLATE.md"
-  chmod +x "$dest/install.sh" "$dest/scripts/budget_engine.py"
+  cp "$SCRIPT_DIR/references/ARCHITECTURE.md" "$dest/references/ARCHITECTURE.md"
+  cp "$SCRIPT_DIR/references/HOOKS.md" "$dest/references/HOOKS.md"
+  cp "$SCRIPT_DIR/references/PROMPT_RECIPES.md" "$dest/references/PROMPT_RECIPES.md"
+  chmod +x "$dest/install.sh" "$dest/scripts/budget_engine.py" "$dest/scripts/hook_adapter.py" "$dest/scripts/test_budget_engine.py"
 }
 
 echo "Installing ${SKILL_NAME} (mode: ${MODE})..."
@@ -125,7 +182,6 @@ else
   done
 fi
 
-# Safely append .agent_state/ to global gitignore only if core.excludesfile is already configured
 if command -v git >/dev/null 2>&1; then
   EXCLUDES_FILE="$(git config --global --path --get core.excludesfile 2>/dev/null || true)"
   if [[ -n "$EXCLUDES_FILE" && -f "$EXCLUDES_FILE" ]]; then
@@ -137,9 +193,5 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "Installation complete! Verify with:"
-if [[ "$MODE" == "symlink" ]]; then
-  echo "  python3 \"${INSTALL_ROOT}/scripts/test_budget_engine.py\""
-else
-  echo "  python3 \"${TARGETS[0]}/scripts/test_budget_engine.py\""
-fi
+echo "Installation complete! Run health check with:"
+echo "  bash install.sh --doctor"
