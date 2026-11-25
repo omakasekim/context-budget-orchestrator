@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context-budget-orchestrator: Zero-dependency context-window budget engine.
+context-budget-orchestrator: Zero-dependency context-window budget & Context Graph engine.
 
 Requires Python 3.9+ standard library only (automatically uses `tiktoken` if installed).
 Supports Claude Code, Gemini CLI, and OpenAI Codex CLI across macOS, Linux, and Windows.
@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # Optional tiktoken support with zero hard dependency
 try:
@@ -105,7 +105,6 @@ def resolve_context_limit(model: Optional[str], limit_override: Optional[int] = 
         normalized = model.strip().lower()
         if normalized in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[normalized]
-        # Longest-prefix match handles dated snapshots like claude-sonnet-4-6-20260201
         for key in sorted(MODEL_CONTEXT_WINDOWS.keys(), key=len, reverse=True):
             if normalized.startswith(key) or key in normalized:
                 return MODEL_CONTEXT_WINDOWS[key]
@@ -359,7 +358,6 @@ def _validate_and_topo_sort(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         by_id[tid] = normalized
         order_index[tid] = idx
 
-    # Verify dependency references exist
     in_degree: Dict[str, int] = {tid: 0 for tid in by_id}
     dependents: Dict[str, List[str]] = {tid: [] for tid in by_id}
     for tid, task in by_id.items():
@@ -371,7 +369,6 @@ def _validate_and_topo_sort(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             in_degree[tid] += 1
             dependents[dep].append(tid)
 
-    # Kahn's topological sort preserving original declaration order where possible
     ready = sorted([tid for tid, deg in in_degree.items() if deg == 0], key=lambda k: order_index[k])
     sorted_tasks: List[Dict[str, Any]] = []
 
@@ -422,8 +419,6 @@ def _split_oversized_task(
     chunks: List[Dict[str, Any]] = []
 
     if files:
-        # Partition files_to_read into sequential buckets respecting raw_cap
-        # Reserve a small slice of output tokens per bucket
         file_buckets: List[List[str]] = []
         current_bucket: List[str] = []
         current_tokens = 0
@@ -441,7 +436,6 @@ def _split_oversized_task(
         if current_bucket:
             file_buckets.append(current_bucket)
 
-        # If all files landed in 1 bucket (e.g. single huge file or huge output_tokens), split by output/parts
         total_raw = sum(per_file_tokens.values()) + expected_out
         min_parts = max(2, int(math.ceil(total_raw / max(1, raw_cap))))
         if len(file_buckets) == 1 and min_parts > 1:
@@ -486,7 +480,6 @@ def _split_oversized_task(
                     }
                 )
     else:
-        # No files listed; split expected_output_tokens cleanly
         num_parts = max(2, int(math.ceil(expected_out / max(1, raw_cap))))
         out_per_part = int(math.ceil(expected_out / num_parts))
         for idx in range(1, num_parts + 1):
@@ -537,6 +530,258 @@ def _save_schedule(workspace: Path, schedule: Dict[str, Any]) -> Path:
     return sched_path
 
 
+# ---------------------------------------------------------------------------
+# Context Graph Engine (.agent_state/context_graph.json + Mermaid projection)
+# ---------------------------------------------------------------------------
+
+def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a canonical typed knowledge & execution graph from schedule state."""
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: List[Dict[str, str]] = []
+    seen_edges: Set[Tuple[str, str, str]] = set()
+
+    def add_node(node_id: str, node_type: str, label: str, **attrs: Any) -> None:
+        if node_id not in nodes:
+            nodes[node_id] = {"id": node_id, "type": node_type, "label": label, **attrs}
+        else:
+            nodes[node_id].update({k: v for k, v in attrs.items() if v is not None})
+
+    def add_edge(src: str, dst: str, rel: str) -> None:
+        key = (src, dst, rel)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            edges.append({"from": src, "to": dst, "relation": rel})
+
+    objective = schedule.get("objective", "")
+    if objective:
+        add_node("objective:root", "objective", objective)
+
+    for idx, constraint in enumerate(schedule.get("constraints", []), start=1):
+        cid = f"constraint:{idx}"
+        add_node(cid, "constraint", constraint)
+        if objective:
+            add_edge(cid, "objective:root", "CONSTRAINS")
+
+    completed_by_id: Dict[str, Dict[str, Any]] = {
+        str(r.get("task_id")): r for r in schedule.get("completed_records", []) if r.get("task_id")
+    }
+    completed_set = set(schedule.get("completed_task_ids", []))
+
+    for task in schedule.get("tasks", []):
+        tid = str(task.get("id"))
+        node_id = f"task:{tid}"
+        rec = completed_by_id.get(tid)
+        status = "completed" if tid in completed_set or task.get("status") == "completed" else "pending"
+        add_node(
+            node_id,
+            "task",
+            str(task.get("title", tid)),
+            task_id=tid,
+            status=status,
+            batch=int(task.get("batch", 1)),
+            estimated_tokens=int(task.get("estimated_tokens", 0)),
+            summary=rec.get("summary", "") if rec else "",
+            verification=rec.get("verification", "") if rec else "",
+        )
+        if objective:
+            add_edge(node_id, "objective:root", "IMPLEMENTS")
+
+        for dep in task.get("dependencies", []):
+            add_edge(node_id, f"task:{dep}", "DEPENDS_ON")
+
+        for fp in task.get("files_to_read", []):
+            fnode = f"file:{fp}"
+            add_node(fnode, "file", fp, path=fp)
+            add_edge(node_id, fnode, "READS")
+
+        if rec:
+            for fp in rec.get("files_touched", []):
+                fnode = f"file:{fp}"
+                add_node(fnode, "file", fp, path=fp, last_touched_by=tid)
+                add_edge(node_id, fnode, "TOUCHES")
+
+    # Dead ends / failed attempts linked to matching tasks or files when mentioned
+    all_task_ids = [str(t.get("id")) for t in schedule.get("tasks", [])]
+    all_file_paths = [n["path"] for n in nodes.values() if n["type"] == "file"]
+    for idx, note in enumerate(schedule.get("failed_attempts", []), start=1):
+        did = f"dead_end:{idx}"
+        add_node(did, "dead_end", note)
+        linked = False
+        low = note.lower()
+        for tid in all_task_ids:
+            if re.search(rf"\b{re.escape(tid.lower())}\b", low):
+                add_edge(did, f"task:{tid}", "WARNS_TASK")
+                linked = True
+        for fp in all_file_paths:
+            if fp.lower() in low or Path(fp).name.lower() in low:
+                add_edge(did, f"file:{fp}", "WARNS_FILE")
+                linked = True
+        if not linked and objective:
+            add_edge(did, "objective:root", "WARNS_GLOBAL")
+
+    git_anchor = schedule.get("git_anchor")
+    if git_anchor:
+        add_node(
+            "checkpoint:latest",
+            "checkpoint",
+            f"{git_anchor.get('branch', 'N/A')}@{git_anchor.get('head_short', 'N/A')}",
+            git_anchor=git_anchor,
+            resume_pointer=schedule.get("resume_pointer", ""),
+            updated_at=schedule.get("updated_at", utc_now_iso()),
+        )
+
+    return {
+        "schema_version": 1,
+        "updated_at": schedule.get("updated_at", utc_now_iso()),
+        "workspace": schedule.get("workspace", ""),
+        "resume_pointer": schedule.get("resume_pointer", ""),
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "task_count": sum(1 for n in nodes.values() if n["type"] == "task"),
+            "file_count": sum(1 for n in nodes.values() if n["type"] == "file"),
+            "dead_end_count": sum(1 for n in nodes.values() if n["type"] == "dead_end"),
+        },
+        "nodes": list(nodes.values()),
+        "edges": edges,
+    }
+
+
+def _save_context_graph(workspace: Path, graph: Dict[str, Any], archive: bool = False) -> Tuple[Path, Optional[Path]]:
+    sdir = _state_dir(workspace)
+    sdir.mkdir(parents=True, exist_ok=True)
+    graph_path = sdir / "context_graph.json"
+    serialized = json.dumps(graph, indent=2) + "\n"
+    graph_path.write_text(serialized, encoding="utf-8")
+    archive_path: Optional[Path] = None
+    if archive:
+        archive_dir = sdir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"context_graph_{utc_now_compact()}.json"
+        archive_path.write_text(serialized, encoding="utf-8")
+    return graph_path, archive_path
+
+
+def _load_context_graph(workspace: Path) -> Optional[Dict[str, Any]]:
+    graph_path = _state_dir(workspace) / "context_graph.json"
+    if not graph_path.is_file():
+        return None
+    try:
+        return json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _mermaid_safe_id(raw: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", raw)
+
+
+def _mermaid_safe_label(raw: str) -> str:
+    return raw.replace('"', "'").replace("\n", " ").strip()[:64]
+
+
+def render_mermaid_graph(graph: Dict[str, Any], only_node_ids: Optional[Set[str]] = None) -> str:
+    lines = ["flowchart LR"]
+    nodes_by_id = {n["id"]: n for n in graph.get("nodes", [])}
+
+    included_tasks = [
+        n
+        for n in graph.get("nodes", [])
+        if n["type"] == "task" and (only_node_ids is None or n["id"] in only_node_ids)
+    ]
+    if not included_tasks:
+        lines.append('  empty["No scheduled tasks yet"]')
+        return "\n".join(lines)
+
+    for n in included_tasks:
+        mid = _mermaid_safe_id(n["id"])
+        st = "DONE" if n.get("status") == "completed" else f"B{n.get('batch', 1)}"
+        lbl = _mermaid_safe_label(f"{n.get('task_id')} [{st}]: {n.get('label')}")
+        lines.append(f'  {mid}["{lbl}"]')
+
+    for e in graph.get("edges", []):
+        if e["relation"] != "DEPENDS_ON":
+            continue
+        # Edge is task -> dep (DEPENDS_ON), render execution flow dep --> task
+        task_n = nodes_by_id.get(e["from"])
+        dep_n = nodes_by_id.get(e["to"])
+        if not task_n or not dep_n:
+            continue
+        if only_node_ids is not None and (e["from"] not in only_node_ids or e["to"] not in only_node_ids):
+            continue
+        lines.append(f"  {_mermaid_safe_id(dep_n['id'])} --> {_mermaid_safe_id(task_n['id'])}")
+
+    return "\n".join(lines)
+
+
+def extract_relevant_subgraph(
+    graph: Dict[str, Any], target_task_ids: Sequence[str], depth: int = 2
+) -> Dict[str, Any]:
+    """
+    Prune the full Context Graph down to ONLY the subgraph needed for target_task_ids:
+      - Immutable objective & constraints
+      - Target tasks + upstream DEPENDS_ON ancestors up to `depth` hops
+      - Files read/touched by those tasks (plus 1-hop shared-file producers)
+      - Dead-end warnings attached to those tasks/files or global objective
+      - Latest checkpoint node
+    """
+    nodes_by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in graph.get("nodes", [])}
+    edges: List[Dict[str, str]] = graph.get("edges", [])
+
+    selected: Set[str] = set()
+    # Always include immutable contract & latest checkpoint
+    for nid, node in nodes_by_id.items():
+        if node["type"] in ("objective", "constraint", "checkpoint"):
+            selected.add(nid)
+
+    # Traverse upstream DEPENDS_ON from target tasks
+    frontier: Set[str] = {f"task:{tid}" for tid in target_task_ids if f"task:{tid}" in nodes_by_id}
+    selected.update(frontier)
+    for _ in range(max(1, depth)):
+        next_frontier: Set[str] = set()
+        for e in edges:
+            if e["relation"] == "DEPENDS_ON" and e["from"] in frontier and e["to"] in nodes_by_id:
+                if e["to"] not in selected:
+                    selected.add(e["to"])
+                    next_frontier.add(e["to"])
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
+    # Attach files read or touched by selected tasks
+    selected_files: Set[str] = set()
+    for e in edges:
+        if e["relation"] in ("READS", "TOUCHES") and e["from"] in selected and e["to"] in nodes_by_id:
+            selected.add(e["to"])
+            selected_files.add(e["to"])
+
+    # Attach dead-end warnings linked to selected tasks, selected files, or global objective
+    for e in edges:
+        if e["relation"] in ("WARNS_TASK", "WARNS_FILE", "WARNS_GLOBAL") and e["to"] in selected:
+            selected.add(e["from"])
+
+    sub_nodes = [n for n in graph.get("nodes", []) if n["id"] in selected]
+    sub_edges = [e for e in edges if e["from"] in selected and e["to"] in selected]
+
+    full_tok, _ = estimate_text_tokens(json.dumps(graph))
+    sub_payload = {"nodes": sub_nodes, "edges": sub_edges}
+    sub_tok, _ = estimate_text_tokens(json.dumps(sub_payload))
+    saved_pct = round(max(0.0, ((full_tok - sub_tok) / max(1, full_tok)) * 100.0), 1)
+
+    return {
+        "target_task_ids": list(target_task_ids),
+        "depth": depth,
+        "nodes": sub_nodes,
+        "edges": sub_edges,
+        "relevant_files": sorted(nodes_by_id[fid]["path"] for fid in selected_files if "path" in nodes_by_id[fid]),
+        "relevant_dead_ends": [n["label"] for n in sub_nodes if n["type"] == "dead_end"],
+        "full_graph_tokens": full_tok,
+        "subgraph_tokens": sub_tok,
+        "tokens_saved_pct": saved_pct,
+        "mermaid": render_mermaid_graph(graph, only_node_ids=selected),
+    }
+
+
 def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
     if args.tasks_file:
@@ -561,12 +806,10 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
     rewire_map: Dict[str, str] = {}
 
     for task in ordered_tasks:
-        # Remap any dependencies that were previously split
         remapped_deps = [rewire_map.get(d, d) for d in task["dependencies"]]
         task["dependencies"] = remapped_deps
 
         est_total, file_tok, per_file_tok = _estimate_task_cost(task, workspace, args.model)
-        # Check if single task exceeds full session safe budget (or Batch 1 budget if no deps and tight session)
         if est_total > safe_ceiling:
             chunks, warn = _split_oversized_task(task, per_file_tok, safe_ceiling)
             warnings.append(warn)
@@ -586,7 +829,6 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
                 }
             )
 
-    # Sequential batch bin-packing respecting topological dependency batch floors
     batches: List[Dict[str, Any]] = []
     task_batch_map: Dict[str, int] = {}
 
@@ -615,7 +857,9 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
         while not placed:
             b = ensure_batch(candidate)
             fits = (b["estimated_tokens"] + task["estimated_tokens"]) <= b["budget_tokens"]
-            empty_overflow_ok = (len(b["task_ids"]) == 0) and (candidate > 1 or task["estimated_tokens"] <= b["budget_tokens"])
+            empty_overflow_ok = (len(b["task_ids"]) == 0) and (
+                candidate > 1 or task["estimated_tokens"] <= b["budget_tokens"]
+            )
             if fits or empty_overflow_ok:
                 b["task_ids"].append(task["id"])
                 b["estimated_tokens"] += task["estimated_tokens"]
@@ -625,7 +869,6 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
             else:
                 candidate += 1
 
-    # Preserve existing objective/constraints if schedule already existed
     existing = _load_schedule(workspace) or {}
     now = utc_now_iso()
     schedule: Dict[str, Any] = {
@@ -650,9 +893,12 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
         "updated_at": now,
     }
     sched_path = _save_schedule(workspace, schedule)
+    graph = build_context_graph(schedule)
+    graph_path, _ = _save_context_graph(workspace, graph, archive=False)
 
     return {
         "schedule_path": str(sched_path),
+        "graph_path": str(graph_path),
         "model": schedule["model"],
         "context_limit": context_limit,
         "safe_ceiling_tokens": safe_ceiling,
@@ -691,9 +937,7 @@ def cmd_gate_check(args: argparse.Namespace) -> Dict[str, Any]:
         )
         current_used = cmd_inspect_session(inspect_ns)["used_tokens"]
 
-    # Re-measure live task footprint on disk
     live_est, live_file_tokens, _ = _estimate_task_cost(task, workspace, model)
-    # If task was a synthetic slice of an oversized file, preserve the planned slice floor/cap
     if task.get("split_from") and task.get("estimated_tokens"):
         live_est = min(live_est, int(task["estimated_tokens"]))
 
@@ -797,6 +1041,7 @@ def _render_worklog_markdown(
     pending_tasks: List[Dict[str, Any]],
     failed_attempts: List[str],
     resume_pointer: str,
+    mermaid_graph: str,
 ) -> str:
     template_path = Path(__file__).resolve().parent.parent / "references" / "WORKLOG_TEMPLATE.md"
     if template_path.is_file():
@@ -815,6 +1060,7 @@ def _render_worklog_markdown(
             "- **Branch:** `{{GIT_BRANCH}}`\n"
             "- **HEAD (short):** `{{GIT_HEAD_SHORT}}`\n"
             "- **Working Tree Status:**\n```text\n{{GIT_STATUS_SHORT}}\n```\n\n"
+            "## Execution & Dependency Graph\n```mermaid\n{{MERMAID_GRAPH}}\n```\n\n"
             "## Immutable Objective\n{{OBJECTIVE}}\n\n"
             "## Constraints & Guardrails\n{{CONSTRAINTS_BULLETS}}\n\n"
             "## Completed Tasks\n{{COMPLETED_TASKS_SECTION}}\n\n"
@@ -864,12 +1110,13 @@ def _render_worklog_markdown(
         "{{GIT_BRANCH}}": git_state["branch"],
         "{{GIT_HEAD_SHORT}}": git_state["head_short"],
         "{{GIT_STATUS_SHORT}}": git_state["status_short"] or "(clean)",
+        "{{MERMAID_GRAPH}}": mermaid_graph,
         "{{OBJECTIVE}}": objective or "Not specified.",
         "{{CONSTRAINTS_BULLETS}}": constraints_md,
         "{{COMPLETED_TASKS_SECTION}}": completed_md,
         "{{REMAINING_TASKS_SECTION}}": remaining_md,
         "{{FAILED_ATTEMPTS_BULLETS}}": failed_md,
-        "{{RESUME_POINTER}}": resume_pointer or "Inspect remaining tasks in .agent_state/schedule.json.",
+        "{{RESUME_POINTER}}": resume_pointer or "Inspect remaining tasks in .agent_state/context_graph.json.",
     }
     rendered = template
     for placeholder, value in replacements.items():
@@ -896,7 +1143,6 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
         "created_at": utc_now_iso(),
     }
 
-    # Preserve immutable objective & constraints unless explicitly overridden
     objective = args.objective.strip() if args.objective and args.objective.strip() else schedule.get("objective", "")
     if args.constraints_json is not None:
         parsed_constraints = json.loads(args.constraints_json)
@@ -949,7 +1195,6 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
         else schedule.get("resume_pointer", "")
     )
 
-    # Mark completed tasks in schedule
     completed_set = set(completed_ids)
     pending_tasks: List[Dict[str, Any]] = []
     for task in schedule.get("tasks", []):
@@ -984,6 +1229,11 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     )
     sched_path = _save_schedule(workspace, schedule)
 
+    # Canonical Context Graph + timestamped archive
+    graph = build_context_graph(schedule)
+    graph_path, graph_archive_path = _save_context_graph(workspace, graph, archive=True)
+    mermaid_graph = render_mermaid_graph(graph)
+
     markdown = _render_worklog_markdown(
         timestamp_utc=timestamp_utc,
         model=model,
@@ -995,6 +1245,7 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
         pending_tasks=pending_tasks,
         failed_attempts=failed_attempts,
         resume_pointer=resume_pointer,
+        mermaid_graph=mermaid_graph,
     )
 
     sdir = _state_dir(workspace)
@@ -1009,6 +1260,9 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     return {
         "worklog_path": str(worklog_path),
         "archive_path": str(archive_path),
+        "graph_path": str(graph_path),
+        "graph_archive_path": str(graph_archive_path) if graph_archive_path else None,
+        "graph_stats": graph["stats"],
         "schedule_path": str(sched_path),
         "objective": objective,
         "constraints": constraints,
@@ -1020,14 +1274,43 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def cmd_query_graph(args: argparse.Namespace) -> Dict[str, Any]:
+    workspace = Path(args.workspace).expanduser().resolve()
+    graph = _load_context_graph(workspace)
+    if graph is None:
+        schedule = _load_schedule(workspace)
+        if schedule is None:
+            raise ValueError(f"No context_graph.json or schedule.json found in {_state_dir(workspace)}.")
+        graph = build_context_graph(schedule)
+        _save_context_graph(workspace, graph, archive=False)
+
+    if args.task_id:
+        targets = [t.strip() for t in args.task_id.split(",") if t.strip()]
+    else:
+        pending_nodes = [n for n in graph.get("nodes", []) if n["type"] == "task" and n.get("status") != "completed"]
+        if pending_nodes:
+            min_batch = min(int(n.get("batch", 1)) for n in pending_nodes)
+            targets = [str(n["task_id"]) for n in pending_nodes if int(n.get("batch", 1)) == min_batch]
+        else:
+            targets = []
+
+    subgraph = extract_relevant_subgraph(graph, targets, depth=max(1, int(args.depth)))
+    return {
+        "graph_path": str(_state_dir(workspace) / "context_graph.json"),
+        "graph_stats": graph.get("stats", {}),
+        **subgraph,
+    }
+
+
 def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
     sdir = _state_dir(workspace)
     worklog_path = sdir / "WORKLOG.md"
+    graph_path = sdir / "context_graph.json"
     schedule = _load_schedule(workspace)
 
-    if schedule is None and not worklog_path.is_file():
-        raise ValueError(f"No .agent_state/WORKLOG.md or schedule.json found in {workspace}.")
+    if schedule is None and not worklog_path.is_file() and not graph_path.is_file():
+        raise ValueError(f"No .agent_state/context_graph.json, WORKLOG.md, or schedule.json found in {workspace}.")
 
     schedule = schedule or {}
     saved_git = schedule.get("git_anchor") or {}
@@ -1056,8 +1339,15 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
         next_batch_num = min(int(t.get("batch", 1)) for t in pending_tasks)
         next_batch_tasks = [t for t in pending_tasks if int(t.get("batch", 1)) == next_batch_num]
 
+    # Build/load canonical context graph & extract pruned subgraph for next batch only
+    graph = _load_context_graph(workspace) or build_context_graph(schedule)
+    target_ids = [str(t["id"]) for t in next_batch_tasks]
+    subgraph = extract_relevant_subgraph(graph, target_ids, depth=2)
+
     return {
         "workspace": str(workspace),
+        "graph_path": str(graph_path),
+        "graph_exists": graph_path.is_file(),
         "worklog_path": str(worklog_path),
         "worklog_exists": worklog_path.is_file(),
         "objective": schedule.get("objective", ""),
@@ -1076,6 +1366,17 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
             }
             for t in next_batch_tasks
         ],
+        "focused_subgraph": {
+            "node_count": len(subgraph["nodes"]),
+            "edge_count": len(subgraph["edges"]),
+            "relevant_files": subgraph["relevant_files"],
+            "relevant_dead_ends": subgraph["relevant_dead_ends"],
+            "full_graph_tokens": subgraph["full_graph_tokens"],
+            "subgraph_tokens": subgraph["subgraph_tokens"],
+            "tokens_saved_pct": subgraph["tokens_saved_pct"],
+            "nodes": subgraph["nodes"],
+            "edges": subgraph["edges"],
+        },
         "failed_attempts": schedule.get("failed_attempts", []),
         "saved_git_anchor": saved_git,
         "current_git_state": current_git,
@@ -1084,7 +1385,7 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
-def _format_human_output(command: str, data: Dict[str, Any]) -> str:
+def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.Namespace) -> str:
     if command == "inspect-session":
         return (
             f"[inspect-session] status={data['status']} | "
@@ -1103,7 +1404,8 @@ def _format_human_output(command: str, data: Dict[str, Any]) -> str:
             )
         for w in data["warnings"]:
             lines.append(f"  WARNING: {w}")
-        lines.append(f"  Saved: {data['schedule_path']}")
+        lines.append(f"  Saved schedule: {data['schedule_path']}")
+        lines.append(f"  Saved graph:    {data['graph_path']}")
         return "\n".join(lines)
     if command == "gate-check":
         if data["decision"] == "PROCEED":
@@ -1116,15 +1418,28 @@ def _format_human_output(command: str, data: Dict[str, Any]) -> str:
             f"[gate-check] HALT_AND_HANDOFF task={data['task_id']} | reason={data['reason']}"
         )
     if command == "save-worklog":
+        gs = data.get("graph_stats", {})
         return (
-            f"[save-worklog] Saved {data['worklog_path']} (archive: {data['archive_path']}) | "
-            f"completed={data['completed_count']} pending={data['pending_count']}"
+            f"[save-worklog] Saved graph={data['graph_path']} ({gs.get('node_count', 0)} nodes, {gs.get('edge_count', 0)} edges) "
+            f"and worklog={data['worklog_path']} | completed={data['completed_count']} pending={data['pending_count']}"
         )
+    if command == "query-graph":
+        if getattr(raw_args, "mermaid", False):
+            return data["mermaid"]
+        lines = [
+            f"[query-graph] targets={data['target_task_ids']} | "
+            f"pruned={data['subgraph_tokens']:,}/{data['full_graph_tokens']:,} tok (-{data['tokens_saved_pct']}%)",
+            f"  relevant_files: {', '.join(data['relevant_files']) or '(none)'}",
+            f"  relevant_dead_ends: {len(data['relevant_dead_ends'])}",
+        ]
+        return "\n".join(lines)
     if command == "resume-context":
+        fg = data.get("focused_subgraph", {})
         lines = [
             f"[resume-context] objective={data['objective'] or '(unset)'}",
             f"  resume_pointer: {data['resume_pointer'] or '(unset)'}",
             f"  pending={data['pending_count']} | next_batch={data['next_batch']} | git_drift={data['git_drift_detected']}",
+            f"  context_graph_pruning: {fg.get('subgraph_tokens', 0):,}/{fg.get('full_graph_tokens', 0):,} tok (-{fg.get('tokens_saved_pct', 0)}%)",
         ]
         for d in data["drift_details"]:
             lines.append(f"  DRIFT: {d}")
@@ -1137,7 +1452,7 @@ def _format_human_output(command: str, data: Dict[str, Any]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="budget_engine.py",
-        description="Zero-dependency cross-platform context budget orchestrator.",
+        description="Zero-dependency cross-platform context budget & Context Graph orchestrator.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1151,7 +1466,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ins.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     # 2. plan-schedule
-    p_plan = sub.add_parser("plan-schedule", help="Plan token-safe sequential session batches.")
+    p_plan = sub.add_parser("plan-schedule", help="Plan token-safe sequential session batches and build context_graph.json.")
     p_plan.add_argument("--tasks-json", default=None, help="Inline JSON array of task definitions.")
     p_plan.add_argument("--tasks-file", default=None, help="Path to JSON file containing task definitions.")
     p_plan.add_argument("--model", default=None, help="Active model identifier.")
@@ -1171,7 +1486,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     # 4. save-worklog
-    p_save = sub.add_parser("save-worklog", help="Persist condensed WORKLOG.md and archive snapshot.")
+    p_save = sub.add_parser("save-worklog", help="Persist canonical context_graph.json, condensed WORKLOG.md, and archives.")
     p_save.add_argument("--objective", default=None, help="Immutable overarching objective.")
     p_save.add_argument("--constraints-json", default=None, help="JSON array of immutable constraint strings.")
     p_save.add_argument("--completed-json", default=None, help="JSON array of completed task records.")
@@ -1183,8 +1498,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_save.add_argument("--workspace", default=".", help="Workspace root directory (default: .).")
     p_save.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
-    # 5. resume-context
-    p_res = sub.add_parser("resume-context", help="Load minimal handoff context and detect git drift.")
+    # 5. query-graph
+    p_qg = sub.add_parser("query-graph", help="Extract a token-pruned ancestor/file/dead-end subgraph for a target task.")
+    p_qg.add_argument("--task-id", default=None, help="Target task ID (or comma-separated IDs). Defaults to next pending batch.")
+    p_qg.add_argument("--depth", type=int, default=2, help="Maximum upstream dependency hop depth (default: 2).")
+    p_qg.add_argument("--mermaid", action="store_true", help="Output Mermaid flowchart diagram for the queried subgraph.")
+    p_qg.add_argument("--workspace", default=".", help="Workspace root directory (default: .).")
+    p_qg.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    # 6. resume-context
+    p_res = sub.add_parser("resume-context", help="Load graph-pruned handoff context and detect git drift.")
     p_res.add_argument("--workspace", default=".", help="Workspace root directory (default: .).")
     p_res.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
@@ -1200,6 +1523,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "plan-schedule": cmd_plan_schedule,
         "gate-check": cmd_gate_check,
         "save-worklog": cmd_save_worklog,
+        "query-graph": cmd_query_graph,
         "resume-context": cmd_resume_context,
     }
 
@@ -1215,7 +1539,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if getattr(args, "json", False):
         sys.stdout.write(json.dumps(result, indent=2) + "\n")
     else:
-        sys.stdout.write(_format_human_output(args.command, result) + "\n")
+        sys.stdout.write(_format_human_output(args.command, result, args) + "\n")
     return 0
 
 

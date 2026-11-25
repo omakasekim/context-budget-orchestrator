@@ -61,7 +61,6 @@ class BudgetEngineTests(unittest.TestCase):
         transcript = self.workspace / "session.jsonl"
         transcript.write_text('{"role":"user","content":"hello world"}\n' * 10, encoding="utf-8")
 
-        # GREEN
         rc, green = self._run_cli(
             "inspect-session",
             "--model",
@@ -77,7 +76,6 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(green["detected_source"], "env:CLAUDE_CODE_SESSION")
         self.assertEqual(green["safe_ceiling_tokens"], 68000)
 
-        # YELLOW (55% - 68% and >= 25,000 remaining)
         rc, yellow = self._run_cli(
             "inspect-session",
             "--model",
@@ -92,7 +90,6 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(yellow["status"], "YELLOW")
 
-        # CRITICAL_HANDOFF (> 68%)
         rc, crit = self._run_cli(
             "inspect-session",
             "--model",
@@ -107,7 +104,6 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(crit["status"], "CRITICAL_HANDOFF")
 
-        # CRITICAL_HANDOFF (< 25,000 remaining even if < 68% on a small limit)
         rc, low_rem = self._run_cli(
             "inspect-session",
             "--limit",
@@ -131,7 +127,6 @@ class BudgetEngineTests(unittest.TestCase):
             {"id": "t3", "title": "Refactor C", "files_to_read": ["c.py"], "expected_output_tokens": 12000, "dependencies": ["t2"]},
         ]
 
-        # limit=100,000 -> safe_ceiling=68,000; used=40,000 -> batch1_budget=28,000
         rc, plan = self._run_cli(
             "plan-schedule",
             "--limit",
@@ -149,8 +144,8 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertLessEqual(batch_of["t1"], batch_of["t2"])
         self.assertLessEqual(batch_of["t2"], batch_of["t3"])
         self.assertTrue((self.workspace / ".agent_state" / "schedule.json").is_file())
+        self.assertTrue((self.workspace / ".agent_state" / "context_graph.json").is_file())
 
-        # Cycle detection
         cyclic = [
             {"id": "x1", "title": "Cycle 1", "files_to_read": [], "expected_output_tokens": 500, "dependencies": ["x2"]},
             {"id": "x2", "title": "Cycle 2", "files_to_read": [], "expected_output_tokens": 500, "dependencies": ["x1"]},
@@ -189,7 +184,6 @@ class BudgetEngineTests(unittest.TestCase):
             },
         ]
 
-        # limit=50,000 -> safe_ceiling=34,000, forcing `mega` to split
         rc, plan = self._run_cli(
             "plan-schedule",
             "--limit",
@@ -204,7 +198,6 @@ class BudgetEngineTests(unittest.TestCase):
         task_ids = [t["id"] for t in plan["tasks"]]
         self.assertIn("mega__part1", task_ids)
         self.assertIn("mega__part2", task_ids)
-        # Downstream task must be rewired to the last split chunk
         fin = next(t for t in plan["tasks"] if t["id"] == "finalize")
         self.assertTrue(fin["dependencies"][0].startswith("mega__part"))
 
@@ -255,7 +248,6 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertIn("safe ceiling", halt["reason"])
 
     def test_save_worklog_preserves_contract_and_resume_detects_git_drift(self) -> None:
-        # Initialize a temporary git repo
         subprocess.run(["git", "init", "-b", "main"], cwd=str(self.workspace), check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(self.workspace), check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(self.workspace), check=True)
@@ -276,7 +268,6 @@ class BudgetEngineTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-        # First save sets immutable objective & constraints
         rc, saved1 = self._run_cli(
             "save-worklog",
             "--objective",
@@ -286,7 +277,7 @@ class BudgetEngineTests(unittest.TestCase):
             "--completed-json",
             json.dumps([{"task_id": "t1", "summary": "Initialized config", "files_touched": ["app.py"], "verification": "unit tests ok"}]),
             "--failed-json",
-            json.dumps(["Avoided monkeypatching os.environ globally"]),
+            json.dumps(["Avoided monkeypatching os.environ globally for t2"]),
             "--resume-pointer",
             "Begin task t2 at app.py:1",
             "--used-tokens",
@@ -299,8 +290,10 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(Path(saved1["worklog_path"]).is_file())
         self.assertTrue(Path(saved1["archive_path"]).is_file())
+        self.assertTrue(Path(saved1["graph_path"]).is_file())
+        self.assertTrue(Path(saved1["graph_archive_path"]).is_file())
+        self.assertIn("flowchart LR", Path(saved1["worklog_path"]).read_text(encoding="utf-8"))
 
-        # Second save without --objective/--constraints-json must preserve them
         rc, saved2 = self._run_cli(
             "save-worklog",
             "--resume-pointer",
@@ -316,14 +309,14 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(saved2["objective"], "Ship zero-dependency auth refactor")
         self.assertEqual(saved2["constraints"], ["No third-party packages", "Keep CLI backwards compatible"])
 
-        # Resume before drift -> no drift
         rc, res_clean = self._run_cli("resume-context", "--workspace", str(self.workspace))
         self.assertEqual(rc, 0)
         self.assertFalse(res_clean["git_drift_detected"])
         self.assertEqual(res_clean["pending_count"], 1)
         self.assertEqual(res_clean["next_batch_tasks"][0]["id"], "t2")
+        self.assertTrue(res_clean["graph_exists"])
+        self.assertIn("app.py", res_clean["focused_subgraph"]["relevant_files"])
 
-        # Introduce an out-of-band commit to trigger git drift detection
         (self.workspace / "app.py").write_text("VERSION = 2\n", encoding="utf-8")
         subprocess.run(["git", "add", "app.py"], cwd=str(self.workspace), check=True)
         subprocess.run(["git", "commit", "-m", "external edit"], cwd=str(self.workspace), check=True, capture_output=True)
@@ -332,6 +325,60 @@ class BudgetEngineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(res_drift["git_drift_detected"])
         self.assertTrue(any("Git HEAD moved" in d for d in res_drift["drift_details"]))
+
+    def test_context_graph_prunes_unrelated_branches(self) -> None:
+        for name in ("auth_a.py", "auth_b.py", "billing_a.py", "billing_b.py", "ui_a.py"):
+            (self.workspace / name).write_text(f"# {name}\nval = 1\n", encoding="utf-8")
+
+        tasks = [
+            {"id": "auth1", "title": "Auth token parser", "files_to_read": ["auth_a.py"], "expected_output_tokens": 1000, "dependencies": []},
+            {"id": "auth2", "title": "Auth middleware", "files_to_read": ["auth_b.py"], "expected_output_tokens": 1000, "dependencies": ["auth1"]},
+            {"id": "bill1", "title": "Billing invoice model", "files_to_read": ["billing_a.py"], "expected_output_tokens": 1000, "dependencies": []},
+            {"id": "bill2", "title": "Billing webhook", "files_to_read": ["billing_b.py"], "expected_output_tokens": 1000, "dependencies": ["bill1"]},
+            {"id": "ui1", "title": "Dashboard card", "files_to_read": ["ui_a.py"], "expected_output_tokens": 1000, "dependencies": []},
+        ]
+        rc, _ = self._run_cli("plan-schedule", "--workspace", str(self.workspace), "--tasks-json", json.dumps(tasks))
+        self.assertEqual(rc, 0)
+
+        rc, _ = self._run_cli(
+            "save-worklog",
+            "--objective",
+            "Refactor backend modules cleanly",
+            "--completed-json",
+            json.dumps([
+                {"task_id": "auth1", "summary": "Parsed JWT", "files_touched": ["auth_a.py"], "verification": "ok"},
+                {"task_id": "bill1", "summary": "Added invoice schema", "files_touched": ["billing_a.py"], "verification": "ok"},
+                {"task_id": "ui1", "summary": "Styled card", "files_touched": ["ui_a.py"], "verification": "ok"},
+            ]),
+            "--failed-json",
+            json.dumps([
+                "Do not use PyJWT sync clock in auth2",
+                "Stripe v1 webhook signature failed in bill2",
+            ]),
+            "--resume-pointer",
+            "Continue auth2 in auth_b.py",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc, 0)
+
+        # Query subgraph specifically for auth2 -> must include auth1 & auth dead-end, prune bill1/bill2/ui1
+        rc, sub = self._run_cli("query-graph", "--task-id", "auth2", "--depth", "2", "--workspace", str(self.workspace))
+        self.assertEqual(rc, 0)
+        node_ids = {n["id"] for n in sub["nodes"]}
+        self.assertIn("task:auth2", node_ids)
+        self.assertIn("task:auth1", node_ids)
+        self.assertNotIn("task:bill1", node_ids)
+        self.assertNotIn("task:bill2", node_ids)
+        self.assertNotIn("task:ui1", node_ids)
+        self.assertIn("auth_a.py", sub["relevant_files"])
+        self.assertIn("auth_b.py", sub["relevant_files"])
+        self.assertNotIn("billing_a.py", sub["relevant_files"])
+        self.assertEqual(len(sub["relevant_dead_ends"]), 1)
+        self.assertIn("auth2", sub["relevant_dead_ends"][0])
+        self.assertLess(sub["subgraph_tokens"], sub["full_graph_tokens"])
+        self.assertGreater(sub["tokens_saved_pct"], 25.0)
+        self.assertIn("task_auth1 --> task_auth2", sub["mermaid"])
 
 
 if __name__ == "__main__":
