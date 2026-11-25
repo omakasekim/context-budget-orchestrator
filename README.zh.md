@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.0](https://img.shields.io/badge/Version-3.0%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.4](https://img.shields.io/badge/Version-3.4%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
 
@@ -20,6 +20,7 @@
 6. **主动式上下文预算门禁（`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`）** — 解析 JSONL 会话日志中的精确供应商 `usage` 计数，预警循环修改（thrash loop）与日志膨胀；通过静态 AST/导入分析自动拆分并行波次（`parallel_waves`），严格守住 **68% 安全上限**，并在交接前校验语法与测试。
 7. **内置安全与代码审计引擎（`audit`）** — 零依赖静态扫描 **30 类核心 CWE 漏洞与配置缺陷** + 自定义 JSON 规则（`--rules-file`），支持 OpenAPI 安全契约审计（`openapi`）、自然语言范围（`--scope-nl`）、SHA-256 指纹去重、基线差异对比（`diff` / `--retest-new`）、合规映射（OWASP Top 10 · PCI-DSS v4 · SOC 2 · ISO 27001）、七问分诊门禁、凭据脱敏以及 6 种企业级报告导出（`json` / `sarif` / `html` / `junit` / `csv` / `md`）和 Windows `install.ps1`。
 8. **基于真实证据的智能体核验与仲裁内核（`verify`）** — 不轻信智能体自报的“已完成”：通过 Git 祖先历史与真实 Diff 核验交付（`shipped`，退出码 `0`/`1`），识破空壳 `assert True` 测试、跳过断言与名不副实的提交（`commit-audit`），通过真实工作区指纹检测死循环/空转（`liveness`），确定性仲裁多智能体文件锁与前置依赖（`arbitrate`），并维护人工决策升级队列（`escalate`）。
+9. **自动交互式复选框功能选择器（`configure`）** — 在交互安装及每个工作区首次提示时自动弹出复选框界面：使用 **`↑`/`↓` 方向键**（或 `j`/`k`）移动光标，**`Space`** 切换 `[✓]`/`[ ]` 启用状态，**`Enter`** 确认保存（`a`/`n`/`d` 全选/全不选/默认，`q`/`Esc` 取消），并内置预设（`minimal`、`standard`、`security`、`full`）以及面向无 TTY 对话式 CLI 的多选结构化回退。
 
 ## 兼容的 AI 编程框架与模型
 

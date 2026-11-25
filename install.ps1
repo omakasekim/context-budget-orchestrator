@@ -11,6 +11,7 @@ param(
   [switch]$Copy,
   [switch]$Uninstall,
   [switch]$Doctor,
+  [switch]$NoPrompt,
   [string]$Project = ""
 )
 
@@ -47,7 +48,7 @@ function Copy-SkillPayload([string]$Dest) {
       Copy-Item -LiteralPath $src -Destination (Join-Path $Dest $f) -Force
     }
   }
-  foreach ($s in @("budget_engine.py", "security_audit.py", "truth_verifier.py", "hook_adapter.py", "test_budget_engine.py")) {
+  foreach ($s in @("budget_engine.py", "security_audit.py", "truth_verifier.py", "feature_selector.py", "hook_adapter.py", "test_budget_engine.py")) {
     Copy-Item -LiteralPath (Join-Path $ScriptDir "scripts\$s") -Destination (Join-Path $Dest "scripts\$s") -Force
   }
   foreach ($r in @("WORKLOG_TEMPLATE.md", "ARCHITECTURE.md", "HOOKS.md", "PROMPT_RECIPES.md", "SECURITY_AUDIT.md", "TRUTH_VERIFICATION.md")) {
@@ -91,6 +92,9 @@ if ($Project -ne "") {
     Copy-SkillPayload $dest
     Write-Host "  installed: $dest"
   }
+  if (-not $NoPrompt -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+    & $Py (Join-Path $ProjAbs ".agents\skills\$SkillName\scripts\feature_selector.py") --workspace $ProjAbs
+  }
   exit 0
 }
 
@@ -114,6 +118,10 @@ foreach ($t in $Targets) {
       Write-Host "  copied (symlink fallback): $t"
     }
   }
+}
+
+if (-not $NoPrompt -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+  & $Py (Join-Path $InstallRoot "scripts\feature_selector.py") --global
 }
 
 Write-Host "Installation complete! Verify with: pwsh ./install.ps1 -Doctor"

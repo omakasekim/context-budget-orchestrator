@@ -30,7 +30,7 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
-ENGINE_VERSION = "3.3.0"
+ENGINE_VERSION = "3.4.0"
 DEFAULT_CONTEXT_LIMIT = 200_000
 SAFE_UTILIZATION_RATIO = 0.68
 YELLOW_UTILIZATION_PCT = 55.0
@@ -2513,6 +2513,7 @@ def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
                 open_escalations = sum(1 for i in loaded_esc if i.get("status") == "open")
         except (OSError, json.JSONDecodeError):
             pass
+    feat_cfg = _load_feature_selector_module().load_feature_config(_state_dir(workspace))
     return {
         "engine_version": ENGINE_VERSION,
         "workspace": str(workspace),
@@ -2526,6 +2527,8 @@ def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
         "memory_count": len(schedule.get("memories", [])),
         "active_leases": len(leases),
         "open_escalations": open_escalations,
+        "enabled_features": feat_cfg["enabled_ids"],
+        "features_configured": feat_cfg["configured"],
         "graph_stats": graph.get("stats", {}) if graph else {},
         "resume_pointer": schedule.get("resume_pointer", ""),
         "next_task": pending[0]["id"] if pending else None,
@@ -2651,6 +2654,20 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
         for d in data["drift_details"]:
             lines.append(f"  DRIFT: {d}")
         return "\n".join(lines)
+
+    if command == "configure":
+        if data.get("cancelled"):
+            return "[configure] Cancelled; existing feature selection unchanged."
+        if data.get("mode") == "prompt_required":
+            lines = ["[configure] Non-TTY detected — select features via --preset or --enable/--disable:"]
+            for opt in data.get("prompt_schema", {}).get("options", []):
+                mark = "[x]" if opt["selected"] else "[ ]"
+                lines.append(f"  {mark} {opt['id']}: {opt['label']}")
+            return "\n".join(lines)
+        return (
+            f"[configure] Saved ({data.get('preset', 'custom')}) -> {data.get('config_path')} | "
+            f"enabled={len(data.get('enabled_ids', []))}: {', '.join(data.get('enabled_ids', []))}"
+        )
 
     if command == "verify":
         act = data.get("action")
@@ -2998,6 +3015,32 @@ def cmd_verify(args: argparse.Namespace) -> Dict[str, Any]:
     raise ValueError(f"Unsupported verify action: {action}")
 
 
+# ---------------------------------------------------------------------------
+# Subcommand 19: configure (Interactive Checkbox Feature Selector TUI + Schema)
+# ---------------------------------------------------------------------------
+
+def _load_feature_selector_module():
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import feature_selector  # type: ignore
+    return feature_selector
+
+
+def cmd_configure(args: argparse.Namespace) -> Dict[str, Any]:
+    fs = _load_feature_selector_module()
+    workspace = Path(args.workspace).expanduser().resolve()
+    return fs.configure_features(
+        state_dir=_state_dir(workspace),
+        preset=args.preset,
+        enable=[x.strip() for x in (args.enable or "").split(",") if x.strip()],
+        disable=[x.strip() for x in (args.disable or "").split(",") if x.strip()],
+        show_only=bool(args.show),
+        non_interactive=bool(args.non_interactive),
+        use_global=bool(getattr(args, "use_global", False)),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="budget_engine.py",
@@ -3218,6 +3261,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_vf.add_argument("--workspace", default=".")
     p_vf.add_argument("--json", action="store_true")
 
+    # 19. configure (interactive Up/Down/Space/Enter tick-box feature selector)
+    p_cfg = sub.add_parser("configure", help="Interactive checkbox TUI (Up/Down, Space, Enter) to enable/disable orchestrator features.")
+    p_cfg.add_argument("--preset", default=None, choices=["minimal", "standard", "security", "full"])
+    p_cfg.add_argument("--enable", default="", help="Comma-separated feature IDs to enable.")
+    p_cfg.add_argument("--disable", default="", help="Comma-separated feature IDs to disable.")
+    p_cfg.add_argument("--show", action="store_true", help="Show active feature toggles and multi-select prompt schema.")
+    p_cfg.add_argument("--non-interactive", action="store_true", help="Do not open TTY TUI; emit structured multi-select schema.")
+    p_cfg.add_argument("--global", dest="use_global", action="store_true", help="Read/write global default feature toggles.")
+    p_cfg.add_argument("--workspace", default=".")
+    p_cfg.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -3244,6 +3298,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "status": cmd_status,
         "audit": cmd_audit,
         "verify": cmd_verify,
+        "configure": cmd_configure,
     }
 
     try:

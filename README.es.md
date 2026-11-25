@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.0](https://img.shields.io/badge/Version-3.0%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.4](https://img.shields.io/badge/Version-3.4%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
 
@@ -20,6 +20,7 @@ Una **Agent Skill universal, sin dependencias externas y libre de sobrecarga**, 
 6. **Control proactivo del presupuesto de contexto (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — Extrae métricas reales `usage` desde sesiones JSONL, detecta bucles de edición repetitivos, descubre dependencias locales de Python/JS/TS en oleadas paralelas (`parallel_waves`), impone un **límite seguro del 68%** y verifica sintaxis/pruebas antes de cada entrega.
 7. **Motor integrado de auditoría de seguridad y código (`audit`)** — Escaneo estático sin dependencias de **30 clases CWE críticas** + reglas personalizadas (`--rules-file`), auditoría de contratos OpenAPI (`openapi`), alcance en lenguaje natural (`--scope-nl`), deduplicación por huella SHA-256, comparación contra línea base (`diff` / `--retest-new`), mapeo de cumplimiento (OWASP Top 10 · PCI-DSS v4 · SOC 2 · ISO 27001), triaje de 7 preguntas, redacción de secretos y exportación en 6 formatos (`json`, `sarif`, `html`, `junit`, `csv`, `md`) + `install.ps1` para Windows.
 8. **Núcleo de verificación basada en evidencia y arbitraje (`verify`)** — Nunca confíes ciegamente en el "listo" de un agente: verifica entregas reales contra Git y disco (`shipped` con código de salida `0`/`1`), detecta tests vacíos `assert True`, aserciones omitidas y commits sin respaldo (`commit-audit`), identifica bucles estancados mediante deltas reales (`liveness`), arbitra conflictos de archivos y dependencias entre agentes (`arbitrate`) y gestiona escalaciones humanas (`escalate`).
+9. **Selector interactivo automático de funciones con casillas (`configure`)** — Se activa automáticamente al instalar y en la primera solicitud de cada espacio de trabajo para elegir funciones con **`↑`/`↓`** (o `j`/`k`), **`Space`** para marcar/desmarcar `[✓]`/`[ ]` y **`Enter`** para continuar (`a`/`n`/`d` todo/nada/predeterminado, `q`/`Esc` cancelar), incluyendo perfiles (`minimal`, `standard`, `security`, `full`) y esquema multi-selección de respaldo para CLIs conversacionales sin TTY.
 
 ## Entornos (Harnesses) Compatibles
 

@@ -9,7 +9,7 @@ description: >
 license: MIT
 ---
 
-# Context Budget Orchestrator (v3.0 Universal)
+# Context Budget Orchestrator (v3.4 Universal)
 
 Manage complex multi-file and multi-hour engineering projects cleanly across **Claude Code, Gemini CLI, Codex CLI, Copilot CLI, OpenClaw, OpenCode, DeepSeek Harness (`dsh`), and Grok CLI** without context degradation, edit collisions, or linear handoff bloat.
 
@@ -19,6 +19,13 @@ ENGINE="<SKILL_DIR>/scripts/budget_engine.py"
 ```
 
 ## Six-Pillar Operating Loop
+
+### 0. Automatic Interactive Feature Picker (First Run / On Demand)
+- Before starting a new workspace task (or when asked to pick/change features), check `python3 "$ENGINE" configure --show --workspace "." --json`.
+- If `configured` is `false`, automatically prompt the user with tick boxes (`↑`/`↓` move, `Space` toggle, `Enter` confirm):
+  - In a live terminal TTY, run `python3 "$ENGINE" configure --workspace "."` to launch the zero-dependency ANSI checkbox TUI.
+  - In a chat-based CLI without raw TTY, present `prompt_schema` using the host's native multi-select checkbox prompt, then save their choices via `python3 "$ENGINE" configure --enable "<csv>" --disable "<csv>" --workspace "." --json`.
+- Honor `.agent_state/features.json` throughout the session (skip disabled modules).
 
 ### 1. Inspect Budget, Route Skills & Organize Research
 - Check active context utilization & context-rot alerts first:

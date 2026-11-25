@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.0](https://img.shields.io/badge/Version-3.0%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.4](https://img.shields.io/badge/Version-3.4%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
 
@@ -20,6 +20,7 @@
 6. **선제적 컨텍스트 예산 게이트 (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — JSONL 세션 로그에서 프로바이더의 실제 토큰 사용량을 추출하고, 반복 수정 루프·로그 비대화를 경고하며, 68% 안전 상한선과 핸드오프 전 구문/테스트 무결성을 강제합니다.
 7. **내장 보안·코드 감사 엔진 (`audit`)** — 30개 핵심 CWE 취약점/설정 오류 정적 스캔(`scan`) + 사용자 정의 규칙(`--rules-file`), OpenAPI 보안 계약 감사(`openapi`), 자연어 범위 지정(`--scope-nl`), SHA-256 중복 제거, 베이스라인 비교(`diff` / `--retest-new`), 컴플라이언스 매핑(OWASP Top 10 · PCI-DSS v4 · SOC 2 · ISO 27001), 7-질문 트리아지 게이트, 시크릿 마스킹, 그리고 6종 리포트(`json`, `sarif`, `html`, `junit`, `csv`, `md`)와 Windows `install.ps1`을 지원합니다.
 8. **실증 기반 에이전트 검증 및 중재 커널 (`verify`)** — 에이전트의 "완료" 보고를 그대로 믿지 않고 Git 이력·실제 Diff·파일시스템으로 검증합니다: 커밋 반영 여부 판정(`shipped`, 종료코드 `0`/`1`), 빈 테스트·`assert True`·스킵된 단언문 및 허위 커밋 탐지(`commit-audit`), 공회전/반복 루프 탐지(`liveness`), 멀티 에이전트 파일·의존성 중재(`arbitrate`), 사람 개입 큐(`escalate`).
+9. **자동 대화형 체크박스 기능 선택기 (`configure`)** — 설치 시 또는 새 워크스페이스 첫 프롬프트에서 자동으로 체크박스 메뉴를 띄워 **`↑`/`↓` 방향키**로 이동하고 **`Space`**로 활성화(`[✓]`/`[ ]`)를 전환하며 **`Enter`**로 확정(`q`/`Esc` 취소)할 수 있습니다. 프리셋(`minimal`, `standard`, `security`, `full`)과 비-TTY 채팅 CLI용 다중 선택 스키마 폴백을 모두 지원합니다.
 
 ## 지원 AI 하네스
 

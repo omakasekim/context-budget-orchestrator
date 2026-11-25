@@ -4,7 +4,7 @@
 
 # context-budget-orchestrator
 
-[![Version 3.3](https://img.shields.io/badge/Version-3.3%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
+[![Version 3.4](https://img.shields.io/badge/Version-3.4%20Universal-06B6D4?style=for-the-badge)](scripts/budget_engine.py)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B%20Stdlib%20Only-3B82F6?style=for-the-badge)](scripts/budget_engine.py)
 [![Multi-Harness](https://img.shields.io/badge/Harnesses-Claude%20%7C%20Gemini%20%7C%20Codex%20%7C%20Copilot%20%7C%20OpenClaw%20%7C%20OpenCode%20%7C%20DeepSeek%20%7C%20Grok-10B981?style=for-the-badge)](references/HOOKS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=for-the-badge)](LICENSE)
@@ -23,6 +23,7 @@ Most GitHub orchestrator skills either bloat your system prompt with 600+ lines 
 6. **Proactive Context-Budget Safety (`inspect-session` + `auto-plan` + `gate-check` + `verify-handoff`)** — Extracts exact provider `usage` tokens from JSONL transcripts, flags edit thrash loops & tool bloat, auto-discovers Python/JS/TS import DAGs into file-disjoint `parallel_waves`, enforces a **68% safe ceiling**, and verifies AST syntax/tests before any handoff.
 7. **Built-In Defensive Security & Code Audit Engine (`audit`)** — Modular zero-dependency static scanner across **30 CWE vulnerability & misconfiguration classes** + custom JSON rules (`--rules-file`), **OpenAPI contract security audit** (`openapi`), **natural-language scope** (`--scope-nl`), **SHA-256 finding deduplication**, **baseline diffing & `--retest-new` regression gate**, **compliance crosswalk** (OWASP Top 10:2021, PCI-DSS v4.0, SOC 2 CC, ISO 27001:2022), **7-Question Triage Gate**, **secret/PII redaction**, and **6 export formats** (`json`, `sarif`, `html`, `junit`, `csv`, `md`).
 8. **Ground-Truth Agent Verification & Referee Kernel (`verify`)** — Never trust an agent's self-reported "done": adjudicates claims from real git ancestry (`shipped` — exit `0` `SHIPPED` / exit `1` `NOT_SHIPPED`), catches hollow `assert True` tests, skipped assertions & doc-only code claims (`commit-audit`), detects silent spin/oscillation loops from real workspace deltas (`liveness` — `MOVING` vs `STALLED`), arbitrates multi-agent file & shipped-dependency locks (`arbitrate` — `GRANTED` vs `REFUSED`), and queues unresolved blockers for humans (`escalate`).
+9. **Automatic Interactive Checkbox Feature Selector (`configure`)** — Launches automatically on interactive install and on first prompt in any workspace so users can choose exactly which modules to enable using **`↑`/`↓` arrow keys** (or `j`/`k`), **`Space`** to toggle `[✓]`/`[ ]`, **`a`/`n`/`d`** (all/none/defaults), and **`Enter`** to confirm (`q`/`Esc` cancel), with built-in presets (`minimal`, `standard`, `security`, `full`) and an automatic multi-select schema fallback for chat-based CLIs without raw TTY.
 
 ## Supported Harnesses & Models
 
@@ -54,8 +55,9 @@ pwsh ./install.ps1
 ### Installer Options
 
 ```bash
-bash install.sh --doctor          # Verify Python 3.9+, optional tiktoken, all 6 harness paths & full test suite
+bash install.sh --doctor          # Verify Python 3.9+, optional tiktoken, all 8 harness paths & full test suite
 bash install.sh --project .       # Install directly into ./.agents/skills/ and ./.github/skills/ for team repos
+bash install.sh --no-prompt       # Skip the interactive checkbox feature selector (CI / non-interactive use)
 bash install.sh --copy            # Copy instead of symlinking (for symlink-restricted environments)
 bash install.sh --uninstall       # Cleanly remove all global links and installed files
 ```
@@ -78,7 +80,7 @@ flowchart LR
 
 ## CLI Subcommands (`scripts/budget_engine.py` — all support `--json`)
 
-`inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `audit` · `verify` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
+`configure` · `inspect-session` · `discover-skills` · `auto-plan` · `plan-schedule` · `gate-check` · `lease` · `delegate` · `memory` · `record-decision` · `exec-task` · `compress-output` · `audit` · `verify` · `verify-handoff` · `save-worklog` · `query-graph` · `resume-context` · `status`
 
 ## Additional Docs
 

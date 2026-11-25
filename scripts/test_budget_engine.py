@@ -581,6 +581,86 @@ class FlagshipV3OrchestratorTests(unittest.TestCase):
         self.assertEqual(rc_res, 0)
         self.assertTrue(esc_res["resolved"])
 
+    def test_10_interactive_feature_selector_configure_and_presets(self) -> None:
+        # 1. Fresh workspace -> configure --show reports unconfigured + 8-item multi-select schema
+        rc_show, show = self._run_cli("configure", "--show", "--workspace", str(self.workspace))
+        self.assertEqual(rc_show, 0)
+        self.assertFalse(show["configured"])
+        self.assertEqual(len(show["prompt_schema"]["options"]), 8)
+        self.assertTrue(show["prompt_schema"]["multi_select"])
+
+        # 2. Non-interactive without flags -> returns prompt_required without blocking
+        rc_ni, ni = self._run_cli("configure", "--non-interactive", "--workspace", str(self.workspace))
+        self.assertEqual(rc_ni, 0)
+        self.assertEqual(ni["mode"], "prompt_required")
+
+        # 3. Preset selection persists .agent_state/features.json
+        rc_pre, pre = self._run_cli("configure", "--preset", "security", "--workspace", str(self.workspace))
+        self.assertEqual(rc_pre, 0)
+        self.assertTrue(pre["configured"])
+        self.assertTrue(pre["features"]["security_audit"])
+        self.assertFalse(pre["features"]["skill_router"])
+        self.assertTrue((self.workspace / ".agent_state" / "features.json").is_file())
+
+        # 4. Fine-grained --enable / --disable updates persisted config and surfaces in status
+        rc_ed, ed = self._run_cli(
+            "configure",
+            "--enable",
+            "skill_router",
+            "--disable",
+            "security_audit",
+            "--workspace",
+            str(self.workspace),
+        )
+        self.assertEqual(rc_ed, 0)
+        self.assertTrue(ed["features"]["skill_router"])
+        self.assertFalse(ed["features"]["security_audit"])
+
+        rc_st, st = self._run_cli("status", "--workspace", str(self.workspace))
+        self.assertEqual(rc_st, 0)
+        self.assertTrue(st["features_configured"])
+        self.assertIn("skill_router", st["enabled_features"])
+        self.assertNotIn("security_audit", st["enabled_features"])
+
+        # 5. Direct unit test of interactive ANSI checkbox TUI (Up/Down, Space toggle, All/None, Enter, Esc)
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        sys.path.insert(0, str(SCRIPT_DIR))
+        import feature_selector  # type: ignore
+
+        initial = feature_selector.default_feature_map()
+        # Move DOWN (idx 1 = auto_plan_waves), SPACE (toggle off), UP (idx 0 = budget_gates),
+        # UP (wrap to idx 7 = security_audit), SPACE (toggle on), ENTER (confirm)
+        keys = iter(["DOWN", "SPACE", "UP", "UP", "SPACE", "ENTER"])
+        buf = io.StringIO()
+        with mock.patch.object(feature_selector, "_read_key", side_effect=lambda: next(keys)):
+            with redirect_stdout(buf):
+                picked = feature_selector.run_interactive_tui(initial)
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertFalse(picked["auto_plan_waves"])
+        self.assertTrue(picked["security_audit"])
+        self.assertTrue(picked["budget_gates"])
+        self.assertIn("[✓]", buf.getvalue())
+        self.assertIn("[ ]", buf.getvalue())
+
+        # Select none ('n'), toggle first ('SPACE'), confirm ('ENTER')
+        keys_none = iter(["n", "SPACE", "ENTER"])
+        with mock.patch.object(feature_selector, "_read_key", side_effect=lambda: next(keys_none)):
+            with redirect_stdout(io.StringIO()):
+                picked_min = feature_selector.run_interactive_tui(initial)
+        assert picked_min is not None
+        self.assertEqual([k for k, v in picked_min.items() if v], ["budget_gates"])
+
+        # Cancel via ESC returns None
+        keys_esc = iter(["DOWN", "ESC"])
+        with mock.patch.object(feature_selector, "_read_key", side_effect=lambda: next(keys_esc)):
+            with redirect_stdout(io.StringIO()):
+                cancelled = feature_selector.run_interactive_tui(initial)
+        self.assertIsNone(cancelled)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
