@@ -1,11 +1,9 @@
-# Native Cross-CLI Hooks & Integration Guide
+# Multi-Harness Integration & Hooks Guide
 
-`scripts/hook_adapter.py` lets you automate real-time context budget advisories inside **Claude Code**, **Gemini CLI**, and **OpenAI Codex CLI** without any third-party packages.
+`context-budget-orchestrator` works natively across **8+ AI coding harnesses** with zero external dependencies.
 
 ## 1. Claude Code (`~/.claude/settings.json`)
-
-Add a lightweight `PreToolUse` (or `Stop`) hook so Claude Code automatically warns you whenever context utilization enters `YELLOW` (55%+) or `CRITICAL_HANDOFF` (>68%) or when noisy tool outputs trigger a context-rot alert:
-
+Skill path: `~/.claude/skills/context-budget-orchestrator`
 ```json
 {
   "hooks": {
@@ -25,9 +23,7 @@ Add a lightweight `PreToolUse` (or `Stop`) hook so Claude Code automatically war
 ```
 
 ## 2. Gemini CLI (`~/.gemini/settings.json`)
-
-Wire `hook_adapter.py` into Gemini CLI's `BeforeTool` hook lifecycle:
-
+Skill path: `~/.gemini/skills/context-budget-orchestrator`
 ```json
 {
   "hooks": {
@@ -46,21 +42,31 @@ Wire `hook_adapter.py` into Gemini CLI's `BeforeTool` hook lifecycle:
 }
 ```
 
-## 3. OpenAI Codex CLI (`~/.codex/AGENTS.md` or project `AGENTS.md`)
-
-Codex CLI discovers skills automatically from `~/.agents/skills/context-budget-orchestrator/SKILL.md`. To enforce the budget gate unconditionally across all repos, append this snippet to your global `AGENTS.md`:
-
+## 3. OpenAI Codex CLI (`~/.agents/skills/` & `AGENTS.md`)
+Skill path: `~/.agents/skills/context-budget-orchestrator`
+Append to `~/.codex/AGENTS.md` or your project `AGENTS.md`:
 ```markdown
-## Context Budget Discipline
-- Before multi-file tasks (>2 files), run `python3 ~/.agents/skills/context-budget-orchestrator/scripts/budget_engine.py auto-plan` or `plan-schedule`.
-- Before every subtask, run `gate-check`. On `HALT_AND_HANDOFF`, run `verify-handoff` and `save-worklog`, then stop cleanly.
-- On `"resume worklog"`, run `resume-context --json` and read only the returned `focused_subgraph` and `resume_pointer`.
+- Use `context-budget-orchestrator` (`~/.agents/skills/context-budget-orchestrator/scripts/budget_engine.py`) for multi-file tasks, subagent delegation, and session handoffs.
 ```
 
-## 4. Piping Noisy Test / Build Logs Through `compress-output`
+## 4. GitHub Copilot CLI (`~/.copilot/skills/` or `.github/skills/`)
+- Global install (`bash install.sh`) links to `~/.copilot/skills/context-budget-orchestrator`.
+- Project install (`bash install.sh --project .`) installs into `.github/skills/context-budget-orchestrator`.
+- Reload live inside Copilot CLI with `/skills reload` and verify with `/skills list`.
 
-Save 70–95% context tokens when running verbose test suites:
+## 5. OpenCode (`~/.config/opencode/skills/`)
+- Linked automatically to `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/context-budget-orchestrator`.
+- Delegate specialized subagents directly using:
+  `python3 scripts/budget_engine.py delegate --task-id <id> --role implementer --harness opencode`
 
-```bash
-pytest -vv 2>&1 | python3 ~/.claude/skills/context-budget-orchestrator/scripts/budget_engine.py compress-output --max-lines 60
-```
+## 6. OpenClaw (`~/.openclaw/skills/`)
+- Linked automatically to `~/.openclaw/skills/context-budget-orchestrator`.
+- Session transcripts under `~/.openclaw/sessions` (or `OPENCLAW_SESSION`) are auto-detected by `inspect-session`.
+
+## 7. DeepSeek Harness (`dsh` / `~/.agents/skills/`)
+- Discovered via `~/.agents/skills/context-budget-orchestrator` (or project `.agents/skills/`).
+- Supports `deepseek-v4` (1M), `deepseek-v3.2`, `deepseek-v3`, `deepseek-r1`, and `deepseek/deepseek-v4` provider prefixes, plus `DEEPSEEK_SESSION` / `~/.dsh/sessions`.
+
+## 8. xAI Grok CLI / Grok Build (`grok` / `~/.agents/skills/`)
+- Discovered via `~/.agents/skills/context-budget-orchestrator` and `AGENTS.md`.
+- Supports `grok-4` (256K), `grok-code-fast` (256K), `grok-3` (131K), `xai/grok-4`, plus `GROK_SESSION` / `~/.grok/sessions`, and non-interactive delegation via `delegate --harness grok` (`grok -p`).

@@ -1,107 +1,78 @@
 ---
 name: context-budget-orchestrator
 description: >
-  Flagship context-budget, typed Context Graph, and multi-agent wave orchestrator for Claude Code, Gemini CLI, and OpenAI Codex CLI.
-  Use when inspecting session token budgets or provider telemetry, detecting context rot or edit thrash loops,
-  auto-discovering import dependency schedules (auto-plan) or packing manual task DAGs into token-safe batches and parallel waves,
-  enforcing pre-task budget gates and multi-agent file leases, compressing noisy test/build logs, recording immutable architectural decisions,
-  verifying handoff integrity, persisting graph-backed checkpoints (.agent_state/context_graph.json + WORKLOG.md), or executing subgraph-pruned cold resumes.
+  Universal zero-dependency AI orchestrator skill for long-horizon projects (minutes to hours) across
+  Claude Code, Gemini CLI, OpenAI Codex CLI, GitHub Copilot CLI, OpenClaw, OpenCode, DeepSeek Harness, and Grok CLI.
+  Use to research topics and organize findings into persistent graph memory, plan dependency-ordered batches and file-disjoint parallel waves,
+  write and execute verified code with auto-compressed logs, route to installed companion skills without context bloat,
+  delegate scoped subagent briefs with atomic file leases, enforce 68% context budget gates, and perform subgraph-pruned cold resumes.
+license: MIT
 ---
 
-# Context Budget Orchestrator (v2.0 Flagship)
+# Context Budget Orchestrator (v3.0 Universal)
 
-Eliminate mid-task context truncation, silent attention degradation, edit thrash loops, multi-agent file collisions, and linear handoff bloat across **Claude Code**, **Gemini CLI**, and **OpenAI Codex CLI** using a zero-dependency Python 3.9+ standard-library control plane.
+Manage complex multi-file and multi-hour engineering projects cleanly across **Claude Code, Gemini CLI, Codex CLI, Copilot CLI, OpenClaw, OpenCode, DeepSeek Harness (`dsh`), and Grok CLI** without context degradation, edit collisions, or linear handoff bloat.
 
-Resolve `SKILL_DIR` from the directory containing this `SKILL.md`:
+Resolve `SKILL_DIR` from the folder containing this `SKILL.md`:
 ```bash
 ENGINE="<SKILL_DIR>/scripts/budget_engine.py"
 ```
 
-## Core Operating Protocol
+## Six-Pillar Operating Loop
 
-### 1. Inspect Budget & Rot Signals First
-Before starting any multi-file (>2 files), multi-step, or large-codebase task:
-```bash
-python3 "$ENGINE" inspect-session --model "<active-model>" --json
-```
-- Uses exact provider-reported `usage` tokens from Claude/Gemini/Codex JSONL transcripts when available, falling back to `tiktoken` or a calibrated code/JSON/prose estimator.
-- Inspect `rot_alerts`: if noisy tool output share is high (>45%), pipe subsequent test/build outputs through `compress-output`. If an edit thrash loop is flagged, stop and pivot.
+### 1. Inspect Budget, Route Skills & Organize Research
+- Check active context utilization & context-rot alerts first:
+  ```bash
+  python3 "$ENGINE" inspect-session --model "<active-model>" --json
+  ```
+- Before loading extra skills, route via metadata-only discovery (prevents loading unused skill bodies):
+  ```bash
+  python3 "$ENGINE" discover-skills --query "<topic-or-domain>" --workspace "." --json
+  ```
+- When researching APIs, docs, or codebases, store structured findings in the canonical graph so they persist across sessions:
+  ```bash
+  python3 "$ENGINE" memory --action add --kind research --title "<topic>" --content "<concise-findings>" --source "<url-or-file>" --tags "<tag1,tag2>" --tasks "<task_id>" --workspace "." --json
+  ```
+- Lock architectural invariants with `record-decision --id ADR-01 --decision "<rule>" --rationale "<why>"`.
 
-### 2. Discover & Schedule Token-Safe Batches + Parallel Waves
-- **Automatic static discovery** (scans Python AST + JS/TS imports to build a real dependency DAG, batch schedule, and file-disjoint `parallel_waves`):
+### 2. Plan Dependency Batches & File-Disjoint Parallel Waves
+- Auto-discover local Python/JS/TS import graphs into topological batches + parallel waves:
   ```bash
   python3 "$ENGINE" auto-plan --path "src" --action "Refactor" --objective "<goal>" --model "<active-model>" --used-tokens "<used_tokens>" --workspace "." --json
   ```
-- **Explicit task scheduling** (validates DAG cycles, measures live disk footprints, auto-splits oversized tasks into `<id>__part1`, `<id>__part2`, computes batches + parallel waves, and writes `.agent_state/schedule.json` + `.agent_state/context_graph.json`):
+- Or supply an explicit task DAG (`id`, `title`, `role`, `files_to_read`, `expected_output_tokens`, `dependencies`) via `plan-schedule --tasks-json '<json>'` (auto-splits oversized tasks into `__part1`, `__part2`, ...).
+
+### 3. Delegate to Specialized Subagents Safely
+For tasks in a file-disjoint `parallel_wave` (or distinct roles: `researcher`, `architect`, `implementer`, `reviewer`, `verifier`):
+```bash
+python3 "$ENGINE" delegate --task-id "<task_id>" --role "<role>" --harness "<claude|gemini|codex|opencode|openclaw|copilot|deepseek|grok>" --workspace "." --json
+```
+This atomically claims a file-conflict `lease`, prunes `.agent_state/context_graph.json` down to a tight `--token-budget` brief, recommends up to 2 companion skills, writes `.agent_state/delegations/<task>_<role>.md`, and returns the exact cross-harness dispatch command.
+
+### 4. Write & Execute Code Behind Budget Gates
+Before every subtask, run:
+```bash
+python3 "$ENGINE" gate-check --task-id "<task_id>" --model "<active-model>" --used-tokens "<used_tokens>" --workspace "." --json
+```
+- On `HALT_AND_HANDOFF`: **STOP immediately** and execute Pillar 5.
+- On `PROCEED`: edit only scoped files, then run builds/tests via `exec-task` (automatically compresses verbose logs by 70–95% and records an execution receipt in the graph):
   ```bash
-  python3 "$ENGINE" plan-schedule --model "<active-model>" --used-tokens "<used_tokens>" --workspace "." --tasks-json '<tasks-json>' --json
+  python3 "$ENGINE" exec-task --task-id "<task_id>" --cmd "<build-or-test-cmd>" --workspace "." --json
   ```
-- Show the batch + parallel wave breakdown (and any split warnings) to the user before editing code.
+- Complete the task lease when verified: `lease --action complete --task-id "<task_id>" --agent-id "<agent_id>"`.
 
-### 3. Enforce Pre-Task Gate Checks & Multi-Agent Leases
-Before **every** subtask:
-1. Run `gate-check`:
-   ```bash
-   python3 "$ENGINE" gate-check --task-id "<task_id>" --agent-id "<agent_id>" --model "<active-model>" --used-tokens "<used_tokens>" --workspace "." --json
-   ```
-   - On `HALT_AND_HANDOFF`: **STOP IMMEDIATELY**. Do not start editing. Proceed directly to Rule 5.
-2. When dispatching parallel subagents across tasks in the same `parallel_wave`, claim exclusive task + file locks before editing and mark complete after verification:
-   ```bash
-   python3 "$ENGINE" lease --action claim --task-id "<task_id>" --agent-id "worker-1" --workspace "." --json
-   # ... edit and verify ...
-   python3 "$ENGINE" lease --action complete --task-id "<task_id>" --agent-id "worker-1" --workspace "." --json
-   ```
+### 5. Pre-Flight Verify & Graph-First Atomic Handoff (Multi-Hour Continuity)
+Whenever `status == "CRITICAL_HANDOFF"` (>68% used or <25,000 remaining), `gate-check` halts, or Batch 1 finishes while Batch 2+ remains:
+1. Run `verify-handoff --workspace "." --verify-cmd "<targeted-test-cmd>" --json` — never hand off syntax-broken code or conflict markers.
+2. Persist epoch-tracked `.agent_state/context_graph.json`, `.agent_state/WORKLOG.md` (with Mermaid DAG), and timestamped archives via `save-worklog`.
+3. Give the user a 3–5 bullet summary and instruct them to open a fresh session and say **`resume worklog`**.
 
-### 4. Protect Context Hygiene (Decisions + Output Compression)
-- **Lock architectural invariants** immediately so later sessions never contradict them:
-  ```bash
-  python3 "$ENGINE" record-decision --id "ADR-01" --decision "<invariant>" --rationale "<why>" --tasks "<t1,t2>" --files "<path>" --workspace "." --json
-  ```
-- **Compress verbose logs/diffs** before letting them pollute context:
-  ```bash
-  <test-or-build-command> 2>&1 | python3 "$ENGINE" compress-output --max-lines 60
-  ```
+### 6. Subgraph-Pruned Cold Resume
+On `"resume worklog"` (or whenever `.agent_state/context_graph.json` exists):
+1. Run `python3 "$ENGINE" resume-context --workspace "." --json` (or `query-graph --task-id <id> --token-budget 3000 --json`).
+2. Check `git_drift_detected` and `active_leases`.
+3. Bootstrap **strictly** from `focused_subgraph` (objective, constraints, ADRs, linked research/memory, dead ends, direct ancestors) + `resume_pointer` without re-scanning the entire repository.
 
-### 5. Pre-Flight Verify & Graph-First Atomic Handoff
-Trigger a handoff whenever `inspect-session` returns `CRITICAL_HANDOFF` (>68% used or <25,000 remaining), `gate-check` returns `HALT_AND_HANDOFF`, or Batch 1 completes while Batch 2+ remains:
-1. **Verify repository integrity** (checks Python AST syntax, JSON validity, merge conflict markers, and optional test command):
-   ```bash
-   python3 "$ENGINE" verify-handoff --workspace "." --verify-cmd "<targeted-test-cmd>" --json
-   ```
-   Fix or revert any broken partial edits until `handoff_ready == true`.
-2. **Persist canonical Context Graph + WORKLOG projection + archives**:
-   ```bash
-   python3 "$ENGINE" save-worklog \
-     --objective "<immutable-goal>" \
-     --constraints-json '["<constraint>"]' \
-     --completed-json '[{"task_id":"t1","summary":"...","files_touched":["src/a.py"],"verification":"tests green"}]' \
-     --failed-json '["Avoided X for t2 because ..."]' \
-     --resume-pointer "Start task t2 in src/b.py:42" \
-     --model "<active-model>" \
-     --used-tokens "<used_tokens>" \
-     --workspace "." \
-     --json
-   ```
-3. Give the user a 3–5 bullet status summary and tell them to open a fresh session and say: **`resume worklog`**.
-
-### 6. Subgraph-Pruned Cold-Start Resumption
-When resuming in a workspace containing `.agent_state/context_graph.json` or `.agent_state/WORKLOG.md`:
-1. Run `resume-context` (optionally with `--token-budget 3500` for ultra-tight bootstrap):
-   ```bash
-   python3 "$ENGINE" resume-context --workspace "." --json
-   ```
-2. For targeted inspection of a specific downstream task (or Mermaid/DOT visualization):
-   ```bash
-   python3 "$ENGINE" query-graph --task-id "<task_id>" --depth 2 --token-budget 3000 --workspace "." --json
-   ```
-3. Check `git_drift_detected` and `active_leases`. Inspect only drifted files if any changed out-of-band.
-4. Bootstrap strictly from `focused_subgraph` (objective, constraints, ADRs, direct ancestors, linked dead ends) + `resume_pointer` + `relevant_files`. Never re-scan the whole repository.
-
-## Bundled References & Tools
-- Engine CLI (12 subcommands): `scripts/budget_engine.py`
-- Cross-CLI Hook Adapter (Claude Code & Gemini CLI): `scripts/hook_adapter.py`
-- Unit Test Suite: `scripts/test_budget_engine.py`
-- Architecture & Graph Schema: `references/ARCHITECTURE.md`
-- Native CLI Hooks Setup: `references/HOOKS.md`
-- Copy-Paste Prompt Recipes: `references/PROMPT_RECIPES.md`
-- Worklog Projection Template: `references/WORKLOG_TEMPLATE.md`
+## References
+- Engine: `scripts/budget_engine.py` · Hooks: `scripts/hook_adapter.py` · Tests: `scripts/test_budget_engine.py`
+- Docs: `references/ARCHITECTURE.md`, `references/HOOKS.md`, `references/PROMPT_RECIPES.md`, `references/WORKLOG_TEMPLATE.md`

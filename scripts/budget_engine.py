@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-context-budget-orchestrator v2.0 (Flagship Edition)
-Zero-dependency cross-platform Context Budget, Typed Context Graph & Multi-Agent Orchestration Engine.
+context-budget-orchestrator v3.0 (Universal Multi-Harness Flagship Edition)
+Zero-dependency Context Budget, Typed Memory Graph, Subagent Delegation, Skill Router & Execution Engine.
 
 Requires Python 3.9+ standard library only (automatically upgrades to `tiktoken` if installed).
-Works natively across Claude Code, Gemini CLI, and OpenAI Codex CLI on macOS, Linux, and Windows.
+Works natively across Claude Code, Gemini CLI, OpenAI Codex CLI, GitHub Copilot CLI,
+OpenClaw, OpenCode, DeepSeek Harness (dsh), and xAI Grok CLI.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -28,7 +30,7 @@ try:
 except ImportError:
     tiktoken = None  # type: ignore
 
-ENGINE_VERSION = "2.0.0"
+ENGINE_VERSION = "3.0.0"
 DEFAULT_CONTEXT_LIMIT = 200_000
 SAFE_UTILIZATION_RATIO = 0.68
 YELLOW_UTILIZATION_PCT = 55.0
@@ -75,7 +77,7 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "gemini-2.5-flash": 1_048_576,
     "gemini-2.0-flash": 1_048_576,
     "gemini-1.5-pro": 2_097_152,
-    # OpenAI / Codex
+    # OpenAI / Codex / Copilot
     "gpt-5-codex": 400_000,
     "gpt-5": 400_000,
     "gpt-4.1": 1_047_576,
@@ -86,6 +88,37 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "o3": 200_000,
     "o3-mini": 200_000,
     "o4-mini": 200_000,
+    # DeepSeek (V4 / V3 / R1 / Harness)
+    "deepseek-v4": 1_000_000,
+    "deepseek-v3.2": 128_000,
+    "deepseek-v3": 128_000,
+    "deepseek-r1": 128_000,
+    "deepseek-reasoner": 128_000,
+    "deepseek-chat": 128_000,
+    # xAI Grok (Grok CLI / Grok Build)
+    "grok-4": 256_000,
+    "grok-code-fast": 256_000,
+    "grok-3": 131_072,
+    "grok-3-mini": 131_072,
+}
+
+SPECIALIST_ROLES: Dict[str, str] = {
+    "researcher": "Investigate docs, APIs, and codebase patterns; record concise verified findings via `memory --action add --kind research` without modifying production code.",
+    "architect": "Design interfaces, dependency boundaries, and trade-offs; lock invariants with `record-decision` before implementation begins.",
+    "implementer": "Implement only the scoped files for this task cleanly; avoid touching unrelated modules and verify syntax/tests before returning.",
+    "reviewer": "Audit diffs for security, correctness, edge cases, and regressions; report concrete file:line findings.",
+    "verifier": "Execute build, lint, and test suites via `exec-task` (auto-compressed logs) and certify atomic completion.",
+}
+
+HARNESS_DISPATCH_TEMPLATES: Dict[str, str] = {
+    "claude": 'claude -p "$(cat {brief_file})"',
+    "gemini": 'gemini -p "$(cat {brief_file})"',
+    "codex": 'codex exec "$(cat {brief_file})"',
+    "opencode": 'opencode run "$(cat {brief_file})"',
+    "openclaw": 'openclaw agent run --prompt-file "{brief_file}"',
+    "copilot": 'gh copilot -p "$(cat {brief_file})"',
+    "deepseek": 'dsh run --prompt-file "{brief_file}"',
+    "grok": 'grok -p "$(cat {brief_file})"',
 }
 
 TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]|\n")
@@ -120,6 +153,9 @@ def resolve_context_limit(model: Optional[str], limit_override: Optional[int] = 
 
     if model:
         normalized = model.strip().lower()
+        # Strip OpenCode / OpenClaw / OpenRouter provider prefix e.g. "deepseek/deepseek-v4"
+        if "/" in normalized:
+            normalized = normalized.rsplit("/", 1)[-1]
         if normalized in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[normalized]
         for key in sorted(MODEL_CONTEXT_WINDOWS.keys(), key=len, reverse=True):
@@ -175,7 +211,6 @@ def is_binary_file(path: Path) -> bool:
 def measure_path_tokens(
     target: Path, model: Optional[str] = None
 ) -> Tuple[int, int, List[str]]:
-    """Return (total_tokens, file_count, skipped_reasons)."""
     if not target.exists():
         return 0, 0, [f"missing:{target}"]
 
@@ -213,7 +248,7 @@ def measure_path_tokens(
 
 
 # ---------------------------------------------------------------------------
-# Multi-CLI Transcript Parser & Context-Rot / Thrash-Loop Detector
+# Universal Multi-Harness Transcript Parser & Context-Rot Detector
 # ---------------------------------------------------------------------------
 
 def discover_active_transcript(explicit_transcript: Optional[str] = None) -> Tuple[Optional[Path], str]:
@@ -221,7 +256,17 @@ def discover_active_transcript(explicit_transcript: Optional[str] = None) -> Tup
         p = Path(explicit_transcript).expanduser().resolve()
         return (p if p.exists() else None), "flag:--transcript"
 
-    for env_key in ("CLAUDE_CODE_SESSION", "GEMINI_CLI_SESSION", "CODEX_SESSION"):
+    env_vars = (
+        "CLAUDE_CODE_SESSION",
+        "GEMINI_CLI_SESSION",
+        "CODEX_SESSION",
+        "OPENCLAW_SESSION",
+        "OPENCODE_SESSION",
+        "COPILOT_SESSION",
+        "DEEPSEEK_SESSION",
+        "GROK_SESSION",
+    )
+    for env_key in env_vars:
         val = os.environ.get(env_key, "").strip()
         if val:
             p = Path(val).expanduser()
@@ -229,10 +274,16 @@ def discover_active_transcript(explicit_transcript: Optional[str] = None) -> Tup
                 return p.resolve(), f"env:{env_key}"
 
     home = Path.home()
+    xdg_data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
     candidate_dirs = [
         (home / ".claude" / "projects", "scan:~/.claude/projects"),
         (home / ".gemini" / "tmp", "scan:~/.gemini/tmp"),
         (home / ".codex" / "sessions", "scan:~/.codex/sessions"),
+        (home / ".openclaw" / "sessions", "scan:~/.openclaw/sessions"),
+        (xdg_data / "opencode", "scan:~/.local/share/opencode"),
+        (home / ".copilot" / "session-state", "scan:~/.copilot/session-state"),
+        (home / ".dsh" / "sessions", "scan:~/.dsh/sessions"),
+        (home / ".grok" / "sessions", "scan:~/.grok/sessions"),
     ]
 
     newest_path: Optional[Path] = None
@@ -261,11 +312,10 @@ def discover_active_transcript(explicit_transcript: Optional[str] = None) -> Tup
 
 
 def _extract_usage_tokens(obj: Any) -> Optional[int]:
-    """Extract exact provider-reported token count from Claude/Gemini/OpenAI JSONL usage payloads."""
+    """Extract exact provider-reported token count across Claude, Gemini, OpenAI/Codex, DeepSeek, Grok, OpenCode."""
     if not isinstance(obj, dict):
         return None
 
-    # Direct usage object or nested under message.usage / usageMetadata / response.usage
     candidates = [
         obj.get("usage"),
         obj.get("usageMetadata"),
@@ -275,7 +325,6 @@ def _extract_usage_tokens(obj: Any) -> Optional[int]:
     for usage in candidates:
         if not isinstance(usage, dict):
             continue
-        # Claude: input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
         if "input_tokens" in usage:
             total = (
                 int(usage.get("input_tokens") or 0)
@@ -285,14 +334,12 @@ def _extract_usage_tokens(obj: Any) -> Optional[int]:
             )
             if total > 0:
                 return total
-        # Gemini: totalTokenCount or promptTokenCount + candidatesTokenCount
         if "totalTokenCount" in usage and int(usage.get("totalTokenCount") or 0) > 0:
             return int(usage["totalTokenCount"])
         if "promptTokenCount" in usage:
             total = int(usage.get("promptTokenCount") or 0) + int(usage.get("candidatesTokenCount") or 0)
             if total > 0:
                 return total
-        # OpenAI/Codex: total_tokens or prompt_tokens + completion_tokens
         if "total_tokens" in usage and int(usage.get("total_tokens") or 0) > 0:
             return int(usage["total_tokens"])
         if "prompt_tokens" in usage:
@@ -303,7 +350,6 @@ def _extract_usage_tokens(obj: Any) -> Optional[int]:
 
 
 def analyze_transcript(transcript_path: Path, model: Optional[str] = None) -> Dict[str, Any]:
-    """Parse Claude/Gemini/Codex JSONL or plain-text transcript for exact usage, category share, and rot/thrash signals."""
     raw = transcript_path.read_text(encoding="utf-8", errors="replace")
     fallback_tokens, estimator = estimate_text_tokens(raw, model=model)
 
@@ -322,10 +368,7 @@ def analyze_transcript(transcript_path: Path, model: Optional[str] = None) -> Di
                 json_records = [x for x in loaded if isinstance(x, dict)]
             elif isinstance(loaded, dict):
                 msgs = loaded.get("messages") or loaded.get("history") or loaded.get("events")
-                if isinstance(msgs, list):
-                    json_records = [x for x in msgs if isinstance(x, dict)]
-                else:
-                    json_records = [loaded]
+                json_records = [x for x in msgs if isinstance(x, dict)] if isinstance(msgs, list) else [loaded]
         except json.JSONDecodeError:
             json_records = []
     else:
@@ -363,11 +406,9 @@ def analyze_transcript(transcript_path: Path, model: Optional[str] = None) -> Di
         else:
             breakdown["user"] += tok
 
-        # Detect repeated edits to the same file path in tool calls
         for match in re.findall(r'"(?:path|file_path|target_file)"\s*:\s*"([^"]+)"', text_blob):
             file_edit_counts[match] = file_edit_counts.get(match, 0) + 1
 
-    # Prefer exact API-reported usage when available; otherwise use structured sum or full text estimate
     structured_sum = sum(breakdown.values())
     if last_reported_usage is not None:
         effective_tokens = last_reported_usage
@@ -524,6 +565,36 @@ def _save_json_file(path: Path, data: Dict[str, Any]) -> Path:
     return path
 
 
+def _default_schedule(workspace: Path, model: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+    ctx = resolve_context_limit(model, limit)
+    now = utc_now_iso()
+    return {
+        "schema_version": 3,
+        "engine_version": ENGINE_VERSION,
+        "workspace": str(workspace),
+        "model": model or "default",
+        "context_limit": ctx,
+        "safe_ceiling_tokens": int(ctx * SAFE_UTILIZATION_RATIO),
+        "objective": "",
+        "constraints": [],
+        "decisions": [],
+        "memories": [],
+        "execution_receipts": [],
+        "handoff_epoch": 0,
+        "completed_task_ids": [],
+        "completed_records": [],
+        "failed_attempts": [],
+        "resume_pointer": "",
+        "git_anchor": None,
+        "warnings": [],
+        "tasks": [],
+        "batches": [],
+        "parallel_waves": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
 def _load_schedule(workspace: Path) -> Optional[Dict[str, Any]]:
     return _load_json_file(_state_dir(workspace) / "schedule.json")
 
@@ -536,7 +607,6 @@ def _load_leases(workspace: Path) -> Dict[str, Any]:
     data = _load_json_file(_state_dir(workspace) / "leases.json")
     if not data or not isinstance(data.get("active_leases"), dict):
         return {"schema_version": 1, "active_leases": {}}
-    # Prune expired leases automatically
     now_ts = utc_now().timestamp()
     active = {
         tid: lease
@@ -573,9 +643,11 @@ def _validate_and_topo_sort(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         if expected_out < 0:
             raise ValueError(f"Task '{tid}' field 'expected_output_tokens' must be >= 0.")
 
+        role = str(task.get("role", "implementer")).strip().lower()
         normalized = {
             "id": tid,
             "title": title,
+            "role": role if role in SPECIALIST_ROLES else "implementer",
             "files_to_read": [str(f) for f in files_to_read],
             "expected_output_tokens": expected_out,
             "dependencies": [str(d).strip() for d in deps if str(d).strip()],
@@ -635,6 +707,7 @@ def _split_oversized_task(
 ) -> Tuple[List[Dict[str, Any]], str]:
     tid = task["id"]
     title = task["title"]
+    role = task.get("role", "implementer")
     files = list(task["files_to_read"])
     expected_out = int(task["expected_output_tokens"])
     base_deps = list(task["dependencies"])
@@ -673,6 +746,7 @@ def _split_oversized_task(
                     {
                         "id": part_id,
                         "title": f"{title} (Part {idx}/{min_parts} — slice {files[0]})",
+                        "role": role,
                         "files_to_read": list(files),
                         "expected_output_tokens": part_out_tok,
                         "file_tokens": part_file_tok,
@@ -694,6 +768,7 @@ def _split_oversized_task(
                     {
                         "id": part_id,
                         "title": f"{title} (Part {idx}/{num_parts})",
+                        "role": role,
                         "files_to_read": bucket,
                         "expected_output_tokens": out_per_part,
                         "file_tokens": bucket_file_tok,
@@ -714,6 +789,7 @@ def _split_oversized_task(
                 {
                     "id": part_id,
                     "title": f"{title} (Part {idx}/{num_parts})",
+                    "role": role,
                     "files_to_read": [],
                     "expected_output_tokens": out_per_part,
                     "file_tokens": 0,
@@ -733,10 +809,6 @@ def _split_oversized_task(
 
 
 def compute_parallel_waves(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Group tasks into file-disjoint, dependency-respecting parallel execution waves.
-    Two tasks share a wave iff neither depends on the other and their file footprints do not collide.
-    """
     remaining = list(tasks)
     scheduled_ids: Set[str] = set()
     waves: List[Dict[str, Any]] = []
@@ -758,7 +830,6 @@ def compute_parallel_waves(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 next_remaining.append(t)
 
         if not wave_tasks:
-            # Safety valve (should not occur after topological validation)
             wave_tasks.append(next_remaining.pop(0))
 
         for t in wave_tasks:
@@ -780,11 +851,11 @@ def compute_parallel_waves(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Context Graph Engine (.agent_state/context_graph.json + Mermaid + Graphviz DOT)
+# Context Graph Engine (.agent_state/context_graph.json + Mermaid + DOT)
 # ---------------------------------------------------------------------------
 
 def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a canonical typed knowledge & execution graph from schedule, decisions, and handoff state."""
+    """Build canonical typed Memory + Research + Execution Graph from schedule state."""
     nodes: Dict[str, Dict[str, Any]] = {}
     edges: List[Dict[str, str]] = []
     seen_edges: Set[Tuple[str, str, str]] = set()
@@ -811,7 +882,6 @@ def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
         if objective:
             add_edge(cid, "objective:root", "CONSTRAINS")
 
-    # Immutable architectural decisions / invariants
     for dec in schedule.get("decisions", []):
         did = f"decision:{dec.get('id', 'd')}"
         add_node(
@@ -831,39 +901,68 @@ def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
             add_node(fnode, "file", fp, path=fp)
             add_edge(did, fnode, "GOVERNS_FILE")
 
+    # Structured Research & Ongoing Memory Nodes
+    for mem in schedule.get("memories", []):
+        mid = f"memory:{mem.get('id', 'm')}"
+        add_node(
+            mid,
+            "research" if mem.get("kind") == "research" else "memory",
+            str(mem.get("title", "")),
+            memory_id=mem.get("id"),
+            kind=mem.get("kind", "fact"),
+            content=mem.get("content", ""),
+            source=mem.get("source", ""),
+            tags=mem.get("tags", []),
+            recorded_at=mem.get("recorded_at", ""),
+        )
+        if objective:
+            add_edge(mid, "objective:root", "INFORMS")
+        for tid in mem.get("related_tasks", []):
+            add_edge(mid, f"task:{tid}", "INFORMS_TASK")
+        for fp in mem.get("related_files", []):
+            fnode = f"file:{fp}"
+            add_node(fnode, "file", fp, path=fp)
+            add_edge(mid, fnode, "INFORMS_FILE")
+
     completed_by_id: Dict[str, Dict[str, Any]] = {
         str(r.get("task_id")): r for r in schedule.get("completed_records", []) if r.get("task_id")
     }
     completed_set = set(schedule.get("completed_task_ids", []))
+    receipts_by_tid: Dict[str, List[Dict[str, Any]]] = {}
+    for rcpt in schedule.get("execution_receipts", []):
+        tid = str(rcpt.get("task_id", ""))
+        if tid:
+            receipts_by_tid.setdefault(tid, []).append(rcpt)
 
     for task in schedule.get("tasks", []):
         tid = str(task.get("id"))
         node_id = f"task:{tid}"
         rec = completed_by_id.get(tid)
         status = "completed" if tid in completed_set or task.get("status") == "completed" else "pending"
+        last_rcpt = receipts_by_tid.get(tid, [])[-1] if receipts_by_tid.get(tid) else None
         add_node(
             node_id,
             "task",
             str(task.get("title", tid)),
             task_id=tid,
+            role=task.get("role", "implementer"),
             status=status,
             batch=int(task.get("batch", 1)),
             parallel_wave=int(task.get("parallel_wave", 1)),
             estimated_tokens=int(task.get("estimated_tokens", 0)),
             summary=rec.get("summary", "") if rec else "",
-            verification=rec.get("verification", "") if rec else "",
+            verification=rec.get("verification", "") if rec else (
+                f"exit={last_rcpt['exit_code']} ({last_rcpt['command']})" if last_rcpt else ""
+            ),
         )
         if objective:
             add_edge(node_id, "objective:root", "IMPLEMENTS")
-
         for dep in task.get("dependencies", []):
             add_edge(node_id, f"task:{dep}", "DEPENDS_ON")
-
         for fp in task.get("files_to_read", []):
             fnode = f"file:{fp}"
             add_node(fnode, "file", fp, path=fp)
             add_edge(node_id, fnode, "READS")
-
         if rec:
             for fp in rec.get("files_touched", []):
                 fnode = f"file:{fp}"
@@ -893,15 +992,17 @@ def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
         add_node(
             "checkpoint:latest",
             "checkpoint",
-            f"{git_anchor.get('branch', 'N/A')}@{git_anchor.get('head_short', 'N/A')}",
+            f"Epoch {schedule.get('handoff_epoch', 0)} · {git_anchor.get('branch', 'N/A')}@{git_anchor.get('head_short', 'N/A')}",
+            handoff_epoch=schedule.get("handoff_epoch", 0),
             git_anchor=git_anchor,
             resume_pointer=schedule.get("resume_pointer", ""),
             updated_at=schedule.get("updated_at", utc_now_iso()),
         )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "engine_version": ENGINE_VERSION,
+        "handoff_epoch": schedule.get("handoff_epoch", 0),
         "updated_at": schedule.get("updated_at", utc_now_iso()),
         "workspace": schedule.get("workspace", ""),
         "resume_pointer": schedule.get("resume_pointer", ""),
@@ -911,6 +1012,7 @@ def build_context_graph(schedule: Dict[str, Any]) -> Dict[str, Any]:
             "task_count": sum(1 for n in nodes.values() if n["type"] == "task"),
             "file_count": sum(1 for n in nodes.values() if n["type"] == "file"),
             "decision_count": sum(1 for n in nodes.values() if n["type"] == "decision"),
+            "memory_count": sum(1 for n in nodes.values() if n["type"] in ("memory", "research")),
             "dead_end_count": sum(1 for n in nodes.values() if n["type"] == "dead_end"),
         },
         "nodes": list(nodes.values()),
@@ -979,7 +1081,7 @@ def render_mermaid_graph(graph: Dict[str, Any], only_node_ids: Optional[Set[str]
 
 
 def render_dot_graph(graph: Dict[str, Any], only_node_ids: Optional[Set[str]] = None) -> str:
-    lines = ["digraph ContextGraph {", '  rankdir=LR;', '  node [shape=box, style=rounded];']
+    lines = ["digraph ContextGraph {", "  rankdir=LR;", "  node [shape=box, style=rounded];"]
     nodes_by_id = {n["id"]: n for n in graph.get("nodes", [])}
     for n in graph.get("nodes", []):
         if n["type"] != "task":
@@ -1006,10 +1108,6 @@ def extract_relevant_subgraph(
     depth: int = 2,
     token_budget: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Prune the full Context Graph down to ONLY the subgraph needed for target_task_ids,
-    optionally enforcing a hard --token-budget ceiling by node priority.
-    """
     nodes_by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in graph.get("nodes", [])}
     edges: List[Dict[str, str]] = graph.get("edges", [])
 
@@ -1038,26 +1136,27 @@ def extract_relevant_subgraph(
             break
         frontier = next_frontier
 
-    selected_files: Set[str] = set()
     for e in edges:
         if e["relation"] in ("READS", "TOUCHES") and e["from"] in selected and e["to"] in nodes_by_id:
             selected.add(e["to"])
-            selected_files.add(e["to"])
             hop_distance.setdefault(e["to"], 1)
 
-    # Attach decisions governing global objective, selected tasks, or selected files
     for e in edges:
         if e["relation"] in ("GOVERNS", "GOVERNS_TASK", "GOVERNS_FILE") and e["to"] in selected:
             selected.add(e["from"])
             hop_distance.setdefault(e["from"], 0)
 
-    # Attach dead-end warnings linked to selected tasks, selected files, or global objective
+    for e in edges:
+        if e["relation"] in ("INFORMS_TASK", "INFORMS_FILE", "INFORMS") and e["to"] in selected:
+            # Prefer task/file-linked research; include global INFORMS at hop 2
+            selected.add(e["from"])
+            hop_distance.setdefault(e["from"], 1 if e["relation"] != "INFORMS" else 2)
+
     for e in edges:
         if e["relation"] in ("WARNS_TASK", "WARNS_FILE", "WARNS_GLOBAL") and e["to"] in selected:
             selected.add(e["from"])
             hop_distance.setdefault(e["from"], 1)
 
-    # Optional hard token budget greedy pruning by priority
     priority_rank = {
         "objective": 0,
         "constraint": 1,
@@ -1065,7 +1164,9 @@ def extract_relevant_subgraph(
         "checkpoint": 3,
         "task": 4,
         "dead_end": 5,
-        "file": 6,
+        "research": 6,
+        "memory": 6,
+        "file": 7,
     }
     ordered_selected = sorted(
         (nodes_by_id[nid] for nid in selected),
@@ -1078,7 +1179,6 @@ def extract_relevant_subgraph(
         running_tokens = 0
         for node in ordered_selected:
             ntok, _ = estimate_text_tokens(json.dumps(node))
-            # Always keep objective & target tasks even if budget is very tight
             must_keep = node["type"] == "objective" or (node["type"] == "task" and hop_distance.get(node["id"], 9) == 0)
             if must_keep or (running_tokens + ntok <= token_budget):
                 kept_ids.add(node["id"])
@@ -1107,6 +1207,17 @@ def extract_relevant_subgraph(
             for n in sub_nodes
             if n["type"] == "decision"
         ],
+        "relevant_memories": [
+            {
+                "id": n.get("memory_id"),
+                "kind": n.get("kind"),
+                "title": n["label"],
+                "content": n.get("content", ""),
+                "source": n.get("source", ""),
+            }
+            for n in sub_nodes
+            if n["type"] in ("memory", "research")
+        ],
         "relevant_dead_ends": [n["label"] for n in sub_nodes if n["type"] == "dead_end"],
         "full_graph_tokens": full_tok,
         "subgraph_tokens": sub_tok,
@@ -1117,7 +1228,7 @@ def extract_relevant_subgraph(
 
 
 # ---------------------------------------------------------------------------
-# Subcommand 2: plan-schedule
+# Subcommand 2 & 3: plan-schedule & auto-plan
 # ---------------------------------------------------------------------------
 
 def _execute_plan(
@@ -1153,6 +1264,7 @@ def _execute_plan(
                 {
                     "id": task["id"],
                     "title": task["title"],
+                    "role": task.get("role", "implementer"),
                     "files_to_read": task["files_to_read"],
                     "expected_output_tokens": task["expected_output_tokens"],
                     "file_tokens": file_tok,
@@ -1169,14 +1281,7 @@ def _execute_plan(
         while len(batches) < b_num:
             num = len(batches) + 1
             cap = batch1_budget if num == 1 else safe_ceiling
-            batches.append(
-                {
-                    "batch": num,
-                    "budget_tokens": cap,
-                    "estimated_tokens": 0,
-                    "task_ids": [],
-                }
-            )
+            batches.append({"batch": num, "budget_tokens": cap, "estimated_tokens": 0, "task_ids": []})
         return batches[b_num - 1]
 
     for task in expanded_tasks:
@@ -1204,40 +1309,34 @@ def _execute_plan(
 
     parallel_waves = compute_parallel_waves(expanded_tasks)
 
-    existing = _load_schedule(workspace) or {}
+    existing = _load_schedule(workspace) or _default_schedule(workspace, model, limit)
     now = utc_now_iso()
-    schedule: Dict[str, Any] = {
-        "schema_version": 2,
-        "engine_version": ENGINE_VERSION,
-        "workspace": str(workspace),
-        "model": model or "default",
-        "context_limit": context_limit,
-        "safe_ceiling_tokens": safe_ceiling,
-        "used_tokens_at_plan": used_tokens,
-        "batch1_budget_tokens": batch1_budget,
-        "objective": objective.strip() if objective and objective.strip() else existing.get("objective", ""),
-        "constraints": existing.get("constraints", []),
-        "decisions": existing.get("decisions", []),
-        "completed_task_ids": existing.get("completed_task_ids", []),
-        "completed_records": existing.get("completed_records", []),
-        "failed_attempts": existing.get("failed_attempts", []),
-        "resume_pointer": existing.get("resume_pointer", ""),
-        "git_anchor": existing.get("git_anchor"),
-        "warnings": warnings,
-        "tasks": expanded_tasks,
-        "batches": batches,
-        "parallel_waves": parallel_waves,
-        "created_at": existing.get("created_at", now),
-        "updated_at": now,
-    }
-    sched_path = _save_schedule(workspace, schedule)
-    graph = build_context_graph(schedule)
+    existing.update(
+        {
+            "schema_version": 3,
+            "engine_version": ENGINE_VERSION,
+            "workspace": str(workspace),
+            "model": model or existing.get("model") or "default",
+            "context_limit": context_limit,
+            "safe_ceiling_tokens": safe_ceiling,
+            "used_tokens_at_plan": used_tokens,
+            "batch1_budget_tokens": batch1_budget,
+            "objective": objective.strip() if objective and objective.strip() else existing.get("objective", ""),
+            "warnings": warnings,
+            "tasks": expanded_tasks,
+            "batches": batches,
+            "parallel_waves": parallel_waves,
+            "updated_at": now,
+        }
+    )
+    sched_path = _save_schedule(workspace, existing)
+    graph = build_context_graph(existing)
     graph_path, _ = _save_context_graph(workspace, graph, archive=False)
 
     return {
         "schedule_path": str(sched_path),
         "graph_path": str(graph_path),
-        "model": schedule["model"],
+        "model": existing["model"],
         "context_limit": context_limit,
         "safe_ceiling_tokens": safe_ceiling,
         "batch1_budget_tokens": batch1_budget,
@@ -1254,8 +1353,7 @@ def _execute_plan(
 def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
     if args.tasks_file:
-        raw_text = Path(args.tasks_file).expanduser().read_text(encoding="utf-8")
-        raw_tasks = json.loads(raw_text)
+        raw_tasks = json.loads(Path(args.tasks_file).expanduser().read_text(encoding="utf-8"))
     elif args.tasks_json:
         raw_tasks = json.loads(args.tasks_json)
     else:
@@ -1274,12 +1372,7 @@ def cmd_plan_schedule(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Subcommand 3: auto-plan (Static AST/Import Discovery -> Topological Schedule)
-# ---------------------------------------------------------------------------
-
 def _extract_local_imports(fpath: Path, workspace: Path, known_rel_paths: Set[str]) -> Set[str]:
-    """Zero-dependency local import extractor for Python (via ast) and JS/TS/Go/Rust (via regex)."""
     deps: Set[str] = set()
     try:
         src = fpath.read_text(encoding="utf-8", errors="replace")
@@ -1362,23 +1455,20 @@ def cmd_auto_plan(args: argparse.Namespace) -> Dict[str, Any]:
 
     rel_paths = [fp.relative_to(workspace).as_posix() for fp in discovered_files]
     known_set = set(rel_paths)
-
-    # Extract imports; break any mutual import cycles deterministically so plan-schedule DAG stays acyclic
     raw_imports: Dict[str, Set[str]] = {
         rel: _extract_local_imports(workspace / rel, workspace, known_set) for rel in rel_paths
     }
-    # Order by fewest outgoing deps first (foundational leaf modules first)
     rank = {rel: idx for idx, rel in enumerate(sorted(rel_paths, key=lambda r: (len(raw_imports[r]), r)))}
+    rel_to_tid = {rel: f"mod_{idx + 1}" for idx, rel in enumerate(sorted(rel_paths, key=lambda r: rank[r]))}
 
     tasks: List[Dict[str, Any]] = []
-    rel_to_tid = {rel: f"mod_{idx + 1}" for idx, rel in enumerate(sorted(rel_paths, key=lambda r: rank[r]))}
     for rel in sorted(rel_paths, key=lambda r: rank[r]):
-        # Only keep DAG-safe dependencies (lower rank -> higher rank) to avoid circular import deadlocks
         deps = sorted(rel_to_tid[d] for d in raw_imports[rel] if rank[d] < rank[rel])
         tasks.append(
             {
                 "id": rel_to_tid[rel],
                 "title": f"{args.action}: {rel}",
+                "role": "implementer",
                 "files_to_read": [rel],
                 "expected_output_tokens": max(500, int(args.output_per_file)),
                 "dependencies": deps,
@@ -1445,7 +1535,6 @@ def cmd_gate_check(args: argparse.Namespace) -> Dict[str, Any]:
             f"Remaining context after task ({remaining_after_task}) would drop below minimum buffer ({MIN_REMAINING_TOKENS})."
         )
 
-    # Also check multi-agent file lease conflicts if agent-id provided
     leases = _load_leases(workspace)["active_leases"]
     agent_id = getattr(args, "agent_id", None)
     task_files = set(task.get("files_to_read", []))
@@ -1490,7 +1579,7 @@ def cmd_gate_check(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand 5: lease (Multi-Agent Parallel Execution Lock & Conflict Guard)
+# Subcommand 5: lease (Multi-Agent Lock & Conflict Guard)
 # ---------------------------------------------------------------------------
 
 def cmd_lease(args: argparse.Namespace) -> Dict[str, Any]:
@@ -1514,14 +1603,11 @@ def cmd_lease(args: argparse.Namespace) -> Dict[str, Any]:
         if args.files:
             files = sorted(set(files + _flatten_files_arg(args.files)))
 
-        # Check existing task or file-level lease conflicts
         for other_tid, lease in active.items():
             if lease.get("agent_id") == agent_id and other_tid == args.task_id:
                 continue
             if other_tid == args.task_id:
-                raise ValueError(
-                    f"Conflict: task '{args.task_id}' is already claimed by '{lease.get('agent_id')}'."
-                )
+                raise ValueError(f"Conflict: task '{args.task_id}' is already claimed by '{lease.get('agent_id')}'.")
             overlap = sorted(set(files) & set(lease.get("files", [])))
             if overlap:
                 raise ValueError(
@@ -1561,29 +1647,160 @@ def cmd_lease(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand 6: record-decision (Immutable Architectural Decision Ledger)
+# Subcommand 6: delegate (Specialized Subagent Brief Generator + Lease + Harness Dispatch)
 # ---------------------------------------------------------------------------
+
+def cmd_delegate(args: argparse.Namespace) -> Dict[str, Any]:
+    workspace = Path(args.workspace).expanduser().resolve()
+    schedule = _load_schedule(workspace)
+    if schedule is None:
+        raise ValueError(f"No schedule found in {_state_dir(workspace)}. Run plan-schedule or auto-plan first.")
+
+    task = next((t for t in schedule.get("tasks", []) if t.get("id") == args.task_id), None)
+    if task is None:
+        raise ValueError(f"Task '{args.task_id}' not found in schedule.json.")
+
+    role = (args.role or task.get("role") or "implementer").strip().lower()
+    role_guidance = SPECIALIST_ROLES.get(role, SPECIALIST_ROLES["implementer"])
+    worker_id = (args.agent_id or f"{role}-{args.task_id}").strip()
+
+    # Claim exclusive file/task lease unless --no-lease
+    lease_info: Optional[Dict[str, Any]] = None
+    if not args.no_lease:
+        lease_res = cmd_lease(
+            argparse.Namespace(
+                action="claim",
+                task_id=args.task_id,
+                agent_id=worker_id,
+                files=None,
+                ttl_seconds=DEFAULT_LEASE_TTL_SECONDS,
+                workspace=str(workspace),
+            )
+        )
+        lease_info = lease_res["lease"]
+
+    graph = _load_context_graph(workspace) or build_context_graph(schedule)
+    sub = extract_relevant_subgraph(graph, [args.task_id], depth=2, token_budget=args.token_budget or 3500)
+
+    # Discover top 2 matching installed skills (metadata-only, zero bloat)
+    skill_matches = discover_installed_skills(
+        workspace=workspace, query=f"{task.get('title', '')} {role}", limit=2
+    )["matches"]
+
+    brief_lines = [
+        f"# Subagent Delegation Brief: `{args.task_id}`",
+        f"- **Role:** `{role}` — {role_guidance}",
+        f"- **Worker Lease ID:** `{worker_id}`",
+        f"- **Objective:** {schedule.get('objective') or '(see task)'}",
+        f"- **Task:** {task.get('title')}",
+        f"- **Scoped Files:** {', '.join(f'`{f}`' for f in task.get('files_to_read', [])) or '(none)'}",
+        "",
+        "## Constraints & Architectural Decisions",
+        *([f"- {c}" for c in schedule.get("constraints", [])] or ["- None recorded."]),
+        *[f"- **[{d['id']}]** {d['decision']} ({d['rationale']})" for d in sub["relevant_decisions"]],
+        "",
+        "## Relevant Research & Memory",
+        *(
+            [f"- **[{m['id']} / {m['kind']}] {m['title']}**: {m['content']}" for m in sub["relevant_memories"]]
+            or ["- None linked."]
+        ),
+        "",
+        "## Dead Ends to Avoid",
+        *([f"- {d}" for d in sub["relevant_dead_ends"]] or ["- None."]),
+        "",
+        "## Completion Protocol",
+        f"1. Edit only scoped files; run tests via `python3 scripts/budget_engine.py exec-task --task-id {args.task_id} --cmd \"<test-cmd>\"`.",
+        f"2. Release lease on completion: `python3 scripts/budget_engine.py lease --action complete --task-id {args.task_id} --agent-id {worker_id}`.",
+    ]
+    if skill_matches:
+        brief_lines.extend(
+            ["", "## Recommended Companion Skills", *[f"- `{s['name']}`: {s['description']}" for s in skill_matches]]
+        )
+
+    brief_md = "\n".join(brief_lines) + "\n"
+    briefs_dir = _state_dir(workspace) / "delegations"
+    briefs_dir.mkdir(parents=True, exist_ok=True)
+    brief_path = briefs_dir / f"{args.task_id}_{role}.md"
+    brief_path.write_text(brief_md, encoding="utf-8")
+
+    harness = (args.harness or "claude").strip().lower()
+    dispatch_cmd = HARNESS_DISPATCH_TEMPLATES.get(harness, HARNESS_DISPATCH_TEMPLATES["claude"]).format(
+        brief_file=str(brief_path)
+    )
+
+    return {
+        "task_id": args.task_id,
+        "role": role,
+        "agent_id": worker_id,
+        "harness": harness,
+        "brief_path": str(brief_path),
+        "brief_tokens": estimate_text_tokens(brief_md)[0],
+        "dispatch_command": dispatch_cmd,
+        "lease": lease_info,
+        "recommended_skills": skill_matches,
+        "subgraph_tokens_saved_pct": sub["tokens_saved_pct"],
+        "brief_markdown": brief_md,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Subcommand 7: memory & record-decision (Research Organization + Long-Horizon Memory)
+# ---------------------------------------------------------------------------
+
+def cmd_memory(args: argparse.Namespace) -> Dict[str, Any]:
+    workspace = Path(args.workspace).expanduser().resolve()
+    schedule = _load_schedule(workspace) or _default_schedule(workspace)
+    memories = list(schedule.get("memories", []))
+
+    if args.action == "add":
+        if not args.title or not args.content:
+            raise ValueError("--title and --content are required for memory --action add.")
+        mid = args.id.strip() if args.id else f"MEM-{len(memories) + 1:02d}"
+        entry = {
+            "id": mid,
+            "kind": args.kind,
+            "title": args.title.strip(),
+            "content": args.content.strip(),
+            "source": (args.source or "").strip(),
+            "tags": [t.strip().lower() for t in (args.tags or "").split(",") if t.strip()],
+            "related_tasks": [t.strip() for t in (args.tasks or "").split(",") if t.strip()],
+            "related_files": _flatten_files_arg(args.files),
+            "recorded_at": utc_now_iso(),
+        }
+        memories = [m for m in memories if m.get("id") != mid]
+        memories.append(entry)
+        schedule["memories"] = memories
+        schedule["updated_at"] = utc_now_iso()
+        _save_schedule(workspace, schedule)
+        graph_path, _ = _save_context_graph(workspace, build_context_graph(schedule), archive=False)
+        return {"action": "add", "memory": entry, "total_memories": len(memories), "graph_path": str(graph_path)}
+
+    if args.action == "list":
+        filtered = [m for m in memories if not args.kind or args.kind == "all" or m.get("kind") == args.kind]
+        return {"action": "list", "count": len(filtered), "memories": filtered}
+
+    if args.action == "query":
+        q_terms = [w for w in re.findall(r"[a-z0-9_.-]+", (args.query or "").lower()) if len(w) >= 2]
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for m in memories:
+            if args.kind and args.kind != "all" and m.get("kind") != args.kind:
+                continue
+            hay = " ".join(
+                [m.get("title", ""), m.get("content", ""), m.get("source", ""), *m.get("tags", []), *m.get("related_tasks", [])]
+            ).lower()
+            score = sum(3 if t in m.get("tags", []) else 1 for t in q_terms if t in hay) if q_terms else 1
+            if score > 0:
+                scored.append((score, m))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].get("id", "")))
+        top = [m for _, m in scored[: max(1, int(args.limit or 8))]]
+        return {"action": "query", "query": args.query or "", "count": len(top), "memories": top}
+
+    raise ValueError(f"Unsupported memory action: {args.action}")
+
 
 def cmd_record_decision(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
-    schedule = _load_schedule(workspace) or {
-        "schema_version": 2,
-        "workspace": str(workspace),
-        "model": "default",
-        "context_limit": DEFAULT_CONTEXT_LIMIT,
-        "safe_ceiling_tokens": int(DEFAULT_CONTEXT_LIMIT * SAFE_UTILIZATION_RATIO),
-        "objective": "",
-        "constraints": [],
-        "decisions": [],
-        "completed_task_ids": [],
-        "completed_records": [],
-        "failed_attempts": [],
-        "resume_pointer": "",
-        "tasks": [],
-        "batches": [],
-        "created_at": utc_now_iso(),
-    }
-
+    schedule = _load_schedule(workspace) or _default_schedule(workspace)
     decisions = list(schedule.get("decisions", []))
     dec_id = args.id.strip() if args.id else f"ADR-{len(decisions) + 1:02d}"
     entry = {
@@ -1600,22 +1817,94 @@ def cmd_record_decision(args: argparse.Namespace) -> Dict[str, Any]:
     schedule["updated_at"] = utc_now_iso()
 
     _save_schedule(workspace, schedule)
-    graph = build_context_graph(schedule)
-    graph_path, _ = _save_context_graph(workspace, graph, archive=False)
+    graph_path, _ = _save_context_graph(workspace, build_context_graph(schedule), archive=False)
+    return {"decision": entry, "total_decisions": len(decisions), "graph_path": str(graph_path)}
+
+
+# ---------------------------------------------------------------------------
+# Subcommand 8: discover-skills (Metadata-Only Cross-Harness Skill Router)
+# ---------------------------------------------------------------------------
+
+def _parse_skill_frontmatter(skill_md: Path) -> Optional[Dict[str, str]]:
+    try:
+        head = skill_md.read_text(encoding="utf-8", errors="replace")[:2048]
+    except OSError:
+        return None
+    if not head.startswith("---"):
+        return None
+    parts = head.split("---", 2)
+    if len(parts) < 3:
+        return None
+    fm = parts[1]
+    name_m = re.search(r"(?m)^name:\s*(.+)$", fm)
+    desc_m = re.search(r"(?m)^description:\s*(.+)$", fm)
+    name = name_m.group(1).strip().strip("\"'") if name_m else skill_md.parent.name
+    desc = desc_m.group(1).strip().strip("\"'") if desc_m else ""
+    if desc in (">", "|", ">-", "|-"):
+        # Collect indented continuation lines after YAML block scalar
+        block_m = re.search(r"(?ms)^description:\s*[>|]-?\s*\n((?:[ \t]+.+\n?)+)", fm)
+        if block_m:
+            desc = " ".join(ln.strip() for ln in block_m.group(1).splitlines())
+    return {"name": name, "description": desc[:260], "path": str(skill_md)}
+
+
+def discover_installed_skills(
+    workspace: Path, query: str = "", extra_dirs: Optional[Sequence[Path]] = None, limit: int = 5
+) -> Dict[str, Any]:
+    home = Path.home()
+    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    scan_dirs: List[Path] = [
+        workspace / ".agents" / "skills",
+        workspace / ".github" / "skills",
+        workspace / ".claude" / "skills",
+        home / ".agents" / "skills",
+        home / ".claude" / "skills",
+        home / ".gemini" / "skills",
+        home / ".copilot" / "skills",
+        home / ".openclaw" / "skills",
+        xdg_config / "opencode" / "skills",
+    ]
+    if extra_dirs:
+        scan_dirs.extend(extra_dirs)
+
+    found_by_name: Dict[str, Dict[str, str]] = {}
+    for d in scan_dirs:
+        if not d.is_dir():
+            continue
+        for child in sorted(d.iterdir()):
+            skill_md = child / "SKILL.md" if child.is_dir() else None
+            if skill_md and skill_md.is_file():
+                meta = _parse_skill_frontmatter(skill_md)
+                if meta and meta["name"] not in found_by_name:
+                    found_by_name[meta["name"]] = meta
+
+    q_terms = [w for w in re.findall(r"[a-z0-9_-]+", query.lower()) if len(w) >= 2]
+    scored: List[Tuple[int, Dict[str, str]]] = []
+    for meta in found_by_name.values():
+        hay = f"{meta['name']} {meta['description']}".lower()
+        score = sum(3 if t in meta["name"].lower() else 1 for t in q_terms if t in hay) if q_terms else 1
+        if score > 0:
+            scored.append((score, meta))
+    scored.sort(key=lambda p: (-p[0], p[1]["name"]))
 
     return {
-        "decision": entry,
-        "total_decisions": len(decisions),
-        "graph_path": str(graph_path),
+        "total_discovered": len(found_by_name),
+        "query": query,
+        "matches": [m for _, m in scored[: max(1, limit)]],
     }
 
 
+def cmd_discover_skills(args: argparse.Namespace) -> Dict[str, Any]:
+    workspace = Path(args.workspace).expanduser().resolve()
+    extra = [Path(p).expanduser().resolve() for p in _flatten_files_arg(args.dirs)]
+    return discover_installed_skills(workspace=workspace, query=args.query or "", extra_dirs=extra, limit=int(args.limit))
+
+
 # ---------------------------------------------------------------------------
-# Subcommand 7: compress-output (Zero-Dep Noisy Log / Diff Compressor)
+# Subcommand 9 & 10: compress-output & exec-task (Safe Code Execution + Log Compression)
 # ---------------------------------------------------------------------------
 
 def compress_tool_output(raw_text: str, max_lines: int = 80) -> Dict[str, Any]:
-    """Deterministically compress noisy test/build/diff logs while preserving failures and file:line anchors."""
     lines = raw_text.splitlines()
     raw_tokens, _ = estimate_text_tokens(raw_text)
 
@@ -1629,7 +1918,6 @@ def compress_tool_output(raw_text: str, max_lines: int = 80) -> Dict[str, Any]:
             "tokens_saved_pct": 0.0,
         }
 
-    # Preserve head (10), high-signal error/diff/file-anchor lines, and tail (15)
     signal_re = re.compile(
         r"(error|fail|failed|exception|traceback|assert|warning|conflict|^\+\+\+ |^--- |^@@ |:\d+:)",
         re.IGNORECASE,
@@ -1675,15 +1963,51 @@ def compress_tool_output(raw_text: str, max_lines: int = 80) -> Dict[str, Any]:
 
 
 def cmd_compress_output(args: argparse.Namespace) -> Dict[str, Any]:
-    if args.file:
-        raw = Path(args.file).expanduser().read_text(encoding="utf-8", errors="replace")
-    else:
-        raw = sys.stdin.read()
+    raw = Path(args.file).expanduser().read_text(encoding="utf-8", errors="replace") if args.file else sys.stdin.read()
     return compress_tool_output(raw, max_lines=max(25, int(args.max_lines)))
 
 
+def cmd_exec_task(args: argparse.Namespace) -> Dict[str, Any]:
+    """Execute a code/test/build command for a task with auto-compressed output and graph receipt."""
+    workspace = Path(args.workspace).expanduser().resolve()
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        args.cmd,
+        cwd=str(workspace),
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=max(5, int(args.timeout)),
+        check=False,
+    )
+    elapsed_sec = round(time.monotonic() - t0, 3)
+    combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    comp = compress_tool_output(combined.strip(), max_lines=max(25, int(args.max_lines)))
+
+    receipt = {
+        "task_id": args.task_id or "ad-hoc",
+        "command": args.cmd,
+        "exit_code": proc.returncode,
+        "passed": proc.returncode == 0,
+        "elapsed_sec": elapsed_sec,
+        "tokens_saved_pct": comp["tokens_saved_pct"],
+        "recorded_at": utc_now_iso(),
+    }
+
+    schedule = _load_schedule(workspace)
+    if schedule is not None:
+        receipts = list(schedule.get("execution_receipts", []))
+        receipts.append(receipt)
+        schedule["execution_receipts"] = receipts[-50:]
+        schedule["updated_at"] = utc_now_iso()
+        _save_schedule(workspace, schedule)
+        _save_context_graph(workspace, build_context_graph(schedule), archive=False)
+
+    return {**receipt, "output": comp["compressed_text"], "original_tokens": comp["original_tokens"], "compressed_tokens": comp["compressed_tokens"]}
+
+
 # ---------------------------------------------------------------------------
-# Subcommand 8: verify-handoff (Pre-Handoff Atomic Integrity & Syntax Gate)
+# Subcommand 11: verify-handoff
 # ---------------------------------------------------------------------------
 
 def capture_git_state(workspace: Path) -> Dict[str, Any]:
@@ -1721,7 +2045,6 @@ def cmd_verify_handoff(args: argparse.Namespace) -> Dict[str, Any]:
     issues: List[str] = []
     checked_files: List[str] = []
 
-    # Determine files to inspect: explicit --files, or modified git files, or all tracked code files in workspace
     candidate_paths: List[Path] = []
     if args.files:
         for raw in _flatten_files_arg(args.files):
@@ -1759,7 +2082,6 @@ def cmd_verify_handoff(args: argparse.Namespace) -> Dict[str, Any]:
             except json.JSONDecodeError as exc:
                 issues.append(f"Invalid JSON in {rel}:{exc.lineno}: {exc.msg}")
 
-    # Optional verification command (e.g. pytest / npm test)
     verify_cmd_result: Optional[Dict[str, Any]] = None
     if args.verify_cmd:
         proc = subprocess.run(
@@ -1790,7 +2112,7 @@ def cmd_verify_handoff(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand 9: save-worklog
+# Subcommand 12, 13, 14, 15: save-worklog, query-graph, resume-context, status
 # ---------------------------------------------------------------------------
 
 def _render_worklog_markdown(
@@ -1801,6 +2123,7 @@ def _render_worklog_markdown(
     objective: str,
     constraints: List[str],
     decisions: List[Dict[str, Any]],
+    memories: List[Dict[str, Any]],
     completed_records: List[Dict[str, Any]],
     pending_tasks: List[Dict[str, Any]],
     failed_attempts: List[str],
@@ -1808,31 +2131,26 @@ def _render_worklog_markdown(
     mermaid_graph: str,
 ) -> str:
     template_path = Path(__file__).resolve().parent.parent / "references" / "WORKLOG_TEMPLATE.md"
-    if template_path.is_file():
-        template = template_path.read_text(encoding="utf-8")
-    else:
-        template = (
+    template = (
+        template_path.read_text(encoding="utf-8")
+        if template_path.is_file()
+        else (
             "# Context Budget Worklog\n\n"
-            "## Session Telemetry\n"
-            "- **Timestamp (UTC):** {{TIMESTAMP_UTC}}\n"
-            "- **Model:** `{{MODEL}}`\n"
+            "## Session Telemetry\n- **Timestamp (UTC):** {{TIMESTAMP_UTC}}\n- **Model:** `{{MODEL}}`\n"
             "- **Token Usage:** {{USED_TOKENS}} / {{CONTEXT_LIMIT}} ({{UTILIZATION_PCT}}%)\n"
-            "- **Safe Ceiling (68%):** {{SAFE_CEILING_TOKENS}} tokens\n"
-            "- **Status:** `{{STATUS}}`\n\n"
-            "## Git Anchor\n"
-            "- **Repository:** {{IS_GIT_REPO}}\n"
-            "- **Branch:** `{{GIT_BRANCH}}`\n"
-            "- **HEAD (short):** `{{GIT_HEAD_SHORT}}`\n"
-            "- **Working Tree Status:**\n```text\n{{GIT_STATUS_SHORT}}\n```\n\n"
+            "- **Safe Ceiling (68%):** {{SAFE_CEILING_TOKENS}} tokens\n- **Status:** `{{STATUS}}`\n\n"
+            "## Git Anchor\n- **Repository:** {{IS_GIT_REPO}}\n- **Branch:** `{{GIT_BRANCH}}`\n"
+            "- **HEAD (short):** `{{GIT_HEAD_SHORT}}`\n```text\n{{GIT_STATUS_SHORT}}\n```\n\n"
             "## Execution & Dependency Graph\n```mermaid\n{{MERMAID_GRAPH}}\n```\n\n"
-            "## Immutable Objective\n{{OBJECTIVE}}\n\n"
-            "## Constraints & Guardrails\n{{CONSTRAINTS_BULLETS}}\n\n"
+            "## Immutable Objective\n{{OBJECTIVE}}\n\n## Constraints & Guardrails\n{{CONSTRAINTS_BULLETS}}\n\n"
             "## Architectural Decisions (Invariants)\n{{DECISIONS_BULLETS}}\n\n"
+            "## Organized Research & Memory\n{{MEMORIES_BULLETS}}\n\n"
             "## Completed Tasks\n{{COMPLETED_TASKS_SECTION}}\n\n"
             "## Remaining Schedule\n{{REMAINING_TASKS_SECTION}}\n\n"
             "## Failed Attempts & Dead Ends (Do Not Repeat)\n{{FAILED_ATTEMPTS_BULLETS}}\n\n"
             "## Exact Resume Pointer\n> {{RESUME_POINTER}}\n"
         )
+    )
 
     constraints_md = "\n".join(f"- {c}" for c in constraints) if constraints else "- None recorded."
     decisions_md = (
@@ -1844,33 +2162,34 @@ def _render_worklog_markdown(
         if decisions
         else "- None recorded."
     )
+    memories_md = (
+        "\n".join(
+            f"- **`{m.get('id')}` [{m.get('kind')}] {m.get('title')}**: {m.get('content')}"
+            + (f" *(Source: {m.get('source')})*" if m.get("source") else "")
+            for m in memories
+        )
+        if memories
+        else "- None recorded."
+    )
     if completed_records:
-        comp_lines: List[str] = []
-        for rec in completed_records:
-            tid = rec.get("task_id", "unknown")
-            summary = rec.get("summary", "")
-            files = rec.get("files_touched", [])
-            files_str = ", ".join(f"`{f}`" for f in files) if files else "none"
-            verif = rec.get("verification", "not specified")
-            comp_lines.append(
-                f"- **`{tid}`**: {summary}\n"
-                f"  - Files touched: {files_str}\n"
-                f"  - Verification: {verif}"
-            )
-        completed_md = "\n".join(comp_lines)
+        completed_md = "\n".join(
+            f"- **`{r.get('task_id')}`**: {r.get('summary', '')}\n"
+            f"  - Files touched: {', '.join(f'`{f}`' for f in r.get('files_touched', [])) or 'none'}\n"
+            f"  - Verification: {r.get('verification') or 'not specified'}"
+            for r in completed_records
+        )
     else:
         completed_md = "- None yet."
 
-    if pending_tasks:
-        rem_lines = [
-            f"- [ ] **Batch {t.get('batch', 1)} · Wave {t.get('parallel_wave', 1)} · `{t.get('id')}`**: "
+    remaining_md = (
+        "\n".join(
+            f"- [ ] **Batch {t.get('batch', 1)} · Wave {t.get('parallel_wave', 1)} · `{t.get('id')}` ({t.get('role', 'implementer')})**: "
             f"{t.get('title')} (~{t.get('estimated_tokens', 0):,} tokens)"
             for t in pending_tasks
-        ]
-        remaining_md = "\n".join(rem_lines)
-    else:
-        remaining_md = "- All scheduled tasks completed."
-
+        )
+        if pending_tasks
+        else "- All scheduled tasks completed."
+    )
     failed_md = "\n".join(f"- {f}" for f in failed_attempts) if failed_attempts else "- None recorded."
 
     replacements = {
@@ -1889,6 +2208,7 @@ def _render_worklog_markdown(
         "{{OBJECTIVE}}": objective or "Not specified.",
         "{{CONSTRAINTS_BULLETS}}": constraints_md,
         "{{DECISIONS_BULLETS}}": decisions_md,
+        "{{MEMORIES_BULLETS}}": memories_md,
         "{{COMPLETED_TASKS_SECTION}}": completed_md,
         "{{REMAINING_TASKS_SECTION}}": remaining_md,
         "{{FAILED_ATTEMPTS_BULLETS}}": failed_md,
@@ -1902,24 +2222,7 @@ def _render_worklog_markdown(
 
 def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
-    schedule = _load_schedule(workspace) or {
-        "schema_version": 2,
-        "workspace": str(workspace),
-        "model": args.model or "default",
-        "context_limit": resolve_context_limit(args.model, args.limit),
-        "safe_ceiling_tokens": int(resolve_context_limit(args.model, args.limit) * SAFE_UTILIZATION_RATIO),
-        "objective": "",
-        "constraints": [],
-        "decisions": [],
-        "completed_task_ids": [],
-        "completed_records": [],
-        "failed_attempts": [],
-        "resume_pointer": "",
-        "tasks": [],
-        "batches": [],
-        "parallel_waves": [],
-        "created_at": utc_now_iso(),
-    }
+    schedule = _load_schedule(workspace) or _default_schedule(workspace, args.model, args.limit)
 
     objective = args.objective.strip() if args.objective and args.objective.strip() else schedule.get("objective", "")
     if args.constraints_json is not None:
@@ -1988,12 +2291,14 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     metrics = classify_session_status(used_tokens, context_limit)
     git_state = capture_git_state(workspace)
     timestamp_utc = utc_now_iso()
+    epoch = int(schedule.get("handoff_epoch", 0)) + 1
 
     schedule.update(
         {
             "model": model,
             "context_limit": context_limit,
             "safe_ceiling_tokens": metrics["safe_ceiling_tokens"],
+            "handoff_epoch": epoch,
             "objective": objective,
             "constraints": constraints,
             "completed_task_ids": completed_ids,
@@ -2019,6 +2324,7 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
         objective=objective,
         constraints=constraints,
         decisions=schedule.get("decisions", []),
+        memories=schedule.get("memories", []),
         completed_records=completed_records,
         pending_tasks=pending_tasks,
         failed_attempts=failed_attempts,
@@ -2036,6 +2342,7 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
     archive_path.write_text(markdown, encoding="utf-8")
 
     return {
+        "handoff_epoch": epoch,
         "worklog_path": str(worklog_path),
         "archive_path": str(archive_path),
         "graph_path": str(graph_path),
@@ -2051,10 +2358,6 @@ def cmd_save_worklog(args: argparse.Namespace) -> Dict[str, Any]:
         "session_metrics": metrics,
     }
 
-
-# ---------------------------------------------------------------------------
-# Subcommand 10: query-graph
-# ---------------------------------------------------------------------------
 
 def cmd_query_graph(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
@@ -2082,16 +2385,8 @@ def cmd_query_graph(args: argparse.Namespace) -> Dict[str, Any]:
         depth=max(1, int(args.depth)),
         token_budget=args.token_budget,
     )
-    return {
-        "graph_path": str(_state_dir(workspace) / "context_graph.json"),
-        "graph_stats": graph.get("stats", {}),
-        **subgraph,
-    }
+    return {"graph_path": str(_state_dir(workspace) / "context_graph.json"), "graph_stats": graph.get("stats", {}), **subgraph}
 
-
-# ---------------------------------------------------------------------------
-# Subcommand 11: resume-context
-# ---------------------------------------------------------------------------
 
 def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
@@ -2132,16 +2427,12 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
 
     graph = _load_context_graph(workspace) or build_context_graph(schedule)
     target_ids = [str(t["id"]) for t in next_batch_tasks]
-    subgraph = extract_relevant_subgraph(
-        graph,
-        target_ids,
-        depth=2,
-        token_budget=getattr(args, "token_budget", None),
-    )
+    subgraph = extract_relevant_subgraph(graph, target_ids, depth=2, token_budget=getattr(args, "token_budget", None))
     active_leases = _load_leases(workspace)["active_leases"]
 
     return {
         "workspace": str(workspace),
+        "handoff_epoch": schedule.get("handoff_epoch", 0),
         "graph_path": str(graph_path),
         "graph_exists": graph_path.is_file(),
         "worklog_path": str(worklog_path),
@@ -2157,6 +2448,7 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
             {
                 "id": t.get("id"),
                 "title": t.get("title"),
+                "role": t.get("role", "implementer"),
                 "parallel_wave": t.get("parallel_wave", 1),
                 "files_to_read": t.get("files_to_read", []),
                 "estimated_tokens": t.get("estimated_tokens", 0),
@@ -2170,6 +2462,7 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
             "edge_count": len(subgraph["edges"]),
             "relevant_files": subgraph["relevant_files"],
             "relevant_decisions": subgraph["relevant_decisions"],
+            "relevant_memories": subgraph["relevant_memories"],
             "relevant_dead_ends": subgraph["relevant_dead_ends"],
             "full_graph_tokens": subgraph["full_graph_tokens"],
             "subgraph_tokens": subgraph["subgraph_tokens"],
@@ -2184,10 +2477,6 @@ def cmd_resume_context(args: argparse.Namespace) -> Dict[str, Any]:
         "drift_details": drift_details,
     }
 
-
-# ---------------------------------------------------------------------------
-# Subcommand 12: status (One-Screen Mission Control Dashboard)
-# ---------------------------------------------------------------------------
 
 def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
     workspace = Path(args.workspace).expanduser().resolve()
@@ -2209,12 +2498,14 @@ def cmd_status(args: argparse.Namespace) -> Dict[str, Any]:
     return {
         "engine_version": ENGINE_VERSION,
         "workspace": str(workspace),
+        "handoff_epoch": schedule.get("handoff_epoch", 0),
         "session": session,
         "objective": schedule.get("objective", ""),
         "completed_count": len(completed_set),
         "pending_count": len(pending),
         "total_tasks": len(tasks),
         "decision_count": len(schedule.get("decisions", [])),
+        "memory_count": len(schedule.get("memories", [])),
         "active_leases": len(leases),
         "graph_stats": graph.get("stats", {}) if graph else {},
         "resume_pointer": schedule.get("resume_pointer", ""),
@@ -2249,32 +2540,54 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
             f"{data['total_parallel_waves']} parallel wave(s) (safe_ceiling={data['safe_ceiling_tokens']:,})"
         ]
         for b in data["batches"]:
-            lines.append(
-                f"  Batch {b['batch']} (~{b['estimated_tokens']:,}/{b['budget_tokens']:,} tok): {', '.join(b['task_ids'])}"
-            )
+            lines.append(f"  Batch {b['batch']} (~{b['estimated_tokens']:,}/{b['budget_tokens']:,} tok): {', '.join(b['task_ids'])}")
         for w in data.get("parallel_waves", []):
             tag = "PARALLEL" if w["parallel_safe"] else "SERIAL"
             lines.append(f"  Wave {w['wave']} [{tag}]: {', '.join(w['task_ids'])}")
         for warn in data["warnings"]:
             lines.append(f"  WARNING: {warn}")
-        lines.append(f"  Saved: {data['schedule_path']} & {data['graph_path']}")
         return "\n".join(lines)
 
     if command == "gate-check":
         if data["decision"] == "PROCEED":
-            return (
-                f"[gate-check] PROCEED task={data['task_id']} | "
-                f"projected={data['projected_used_tokens']:,}/{data['safe_ceiling_tokens']:,} safe | "
-                f"remaining_after={data['remaining_after_task']:,}"
-            )
+            return f"[gate-check] PROCEED task={data['task_id']} | projected={data['projected_used_tokens']:,}/{data['safe_ceiling_tokens']:,} safe"
         return f"[gate-check] HALT_AND_HANDOFF task={data['task_id']} | reason={data['reason']}"
 
     if command == "lease":
         if data["action"] == "status":
             return f"[lease] active={data['active_count']} lease(s): {', '.join(data['active_leases'].keys()) or '(none)'}"
         if data["action"] == "claim":
-            return f"[lease] CLAIMED task={data['lease']['task_id']} by agent={data['lease']['agent_id']} (files={len(data['lease']['files'])})"
+            return f"[lease] CLAIMED task={data['lease']['task_id']} by agent={data['lease']['agent_id']}"
         return f"[lease] {data['action'].upper()} task={data['task_id']} released={data['released']}"
+
+    if command == "delegate":
+        return (
+            f"[delegate] task={data['task_id']} role={data['role']} agent={data['agent_id']} "
+            f"brief={data['brief_path']} ({data['brief_tokens']} tok, -{data['subgraph_tokens_saved_pct']}% pruned)\n"
+            f"  dispatch ({data['harness']}): {data['dispatch_command']}"
+        )
+
+    if command == "memory":
+        if data["action"] == "add":
+            m = data["memory"]
+            return f"[memory] Saved {m['id']} [{m['kind']}]: {m['title']} (total={data['total_memories']})"
+        return "\n".join(
+            [f"[memory:{data['action']}] {data['count']} item(s)"]
+            + [f"  - {m['id']} [{m['kind']}] {m['title']}: {m['content'][:90]}" for m in data["memories"]]
+        )
+
+    if command == "discover-skills":
+        return "\n".join(
+            [f"[discover-skills] matched {len(data['matches'])} of {data['total_discovered']} installed skill(s)"]
+            + [f"  - {m['name']}: {m['description'][:100]}" for m in data["matches"]]
+        )
+
+    if command == "exec-task":
+        verdict = "PASS" if data["passed"] else f"FAIL (exit {data['exit_code']})"
+        return (
+            f"[exec-task] {verdict} task={data['task_id']} ({data['elapsed_sec']}s, -{data['tokens_saved_pct']}% log tok)\n"
+            f"{data['output']}"
+        )
 
     if command == "record-decision":
         d = data["decision"]
@@ -2293,8 +2606,9 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
     if command == "save-worklog":
         gs = data.get("graph_stats", {})
         return (
-            f"[save-worklog] Saved graph={data['graph_path']} ({gs.get('node_count', 0)} nodes, {gs.get('edge_count', 0)} edges) "
-            f"and worklog={data['worklog_path']} | completed={data['completed_count']} pending={data['pending_count']}"
+            f"[save-worklog] Epoch {data['handoff_epoch']} | graph={data['graph_path']} "
+            f"({gs.get('node_count', 0)} nodes, {gs.get('edge_count', 0)} edges) | "
+            f"completed={data['completed_count']} pending={data['pending_count']}"
         )
 
     if command == "query-graph":
@@ -2302,27 +2616,21 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
             return data["mermaid"]
         if getattr(raw_args, "dot", False):
             return data["dot"]
-        return "\n".join(
-            [
-                f"[query-graph] targets={data['target_task_ids']} | "
-                f"pruned={data['subgraph_tokens']:,}/{data['full_graph_tokens']:,} tok (-{data['tokens_saved_pct']}%)",
-                f"  relevant_files: {', '.join(data['relevant_files']) or '(none)'}",
-                f"  relevant_decisions: {len(data['relevant_decisions'])} | relevant_dead_ends: {len(data['relevant_dead_ends'])}",
-            ]
+        return (
+            f"[query-graph] targets={data['target_task_ids']} | "
+            f"pruned={data['subgraph_tokens']:,}/{data['full_graph_tokens']:,} tok (-{data['tokens_saved_pct']}%)"
         )
 
     if command == "resume-context":
         fg = data.get("focused_subgraph", {})
         lines = [
-            f"[resume-context] objective={data['objective'] or '(unset)'}",
+            f"[resume-context] Epoch {data['handoff_epoch']} | objective={data['objective'] or '(unset)'}",
             f"  resume_pointer: {data['resume_pointer'] or '(unset)'}",
             f"  pending={data['pending_count']} | next_batch={data['next_batch']} | git_drift={data['git_drift_detected']}",
-            f"  context_graph_pruning: {fg.get('subgraph_tokens', 0):,}/{fg.get('full_graph_tokens', 0):,} tok (-{fg.get('tokens_saved_pct', 0)}%)",
+            f"  graph_pruning: {fg.get('subgraph_tokens', 0):,}/{fg.get('full_graph_tokens', 0):,} tok (-{fg.get('tokens_saved_pct', 0)}%)",
         ]
         for d in data["drift_details"]:
             lines.append(f"  DRIFT: {d}")
-        for t in data["next_batch_tasks"]:
-            lines.append(f"  - {t['id']} [W{t.get('parallel_wave', 1)}]: {t['title']} (~{t['estimated_tokens']:,} tok)")
         return "\n".join(lines)
 
     if command == "status":
@@ -2330,9 +2638,9 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
         bar = _render_progress_bar(s["utilization_pct"])
         return "\n".join(
             [
-                f"=== context-budget-orchestrator v{data['engine_version']} ===",
+                f"=== context-budget-orchestrator v{data['engine_version']} (Epoch {data['handoff_epoch']}) ===",
                 f"Budget:    {bar} {s['utilization_pct']}% {s['status']} ({s['used_tokens']:,}/{s['context_limit']:,} tok)",
-                f"Progress:  {data['completed_count']}/{data['total_tasks']} tasks done | {data['decision_count']} decisions | {data['active_leases']} active lease(s)",
+                f"Progress:  {data['completed_count']}/{data['total_tasks']} tasks | {data['decision_count']} ADRs | {data['memory_count']} memories | {data['active_leases']} leases",
                 f"Graph:     {data['graph_stats'].get('node_count', 0)} nodes / {data['graph_stats'].get('edge_count', 0)} edges",
                 f"Next Task: {data['next_task'] or '(none)'} | Pointer: {data['resume_pointer'] or '(unset)'}",
             ]
@@ -2344,124 +2652,168 @@ def _format_human_output(command: str, data: Dict[str, Any], raw_args: argparse.
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="budget_engine.py",
-        description="Flagship zero-dependency cross-CLI Context Budget, Context Graph & Multi-Agent Orchestrator.",
+        description="Universal zero-dependency Context Budget, Typed Memory Graph, Delegation & Skill Router.",
     )
     parser.add_argument("--version", action="version", version=f"context-budget-orchestrator {ENGINE_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # 1. inspect-session
-    p_ins = sub.add_parser("inspect-session", help="Inspect session usage, provider telemetry, and context-rot alerts.")
-    p_ins.add_argument("--model", default=None, help="Active model identifier.")
-    p_ins.add_argument("--limit", type=int, default=None, help="Explicit context window token limit override.")
-    p_ins.add_argument("--transcript", default=None, help="Path to active session transcript file.")
-    p_ins.add_argument("--files", action="append", nargs="+", default=None, help="File or directory paths to include.")
-    p_ins.add_argument("--extra-tokens", type=int, default=0, help="Additional estimated tokens.")
-    p_ins.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_ins = sub.add_parser("inspect-session", help="Inspect session usage, exact provider telemetry, and rot alerts.")
+    p_ins.add_argument("--model", default=None)
+    p_ins.add_argument("--limit", type=int, default=None)
+    p_ins.add_argument("--transcript", default=None)
+    p_ins.add_argument("--files", action="append", nargs="+", default=None)
+    p_ins.add_argument("--extra-tokens", type=int, default=0)
+    p_ins.add_argument("--json", action="store_true")
 
     # 2. plan-schedule
-    p_plan = sub.add_parser("plan-schedule", help="Plan token-safe sequential batches, parallel waves, and context_graph.json.")
-    p_plan.add_argument("--tasks-json", default=None, help="Inline JSON array of task definitions.")
-    p_plan.add_argument("--tasks-file", default=None, help="Path to JSON file containing task definitions.")
-    p_plan.add_argument("--objective", default=None, help="Optional objective to record immediately.")
-    p_plan.add_argument("--model", default=None, help="Active model identifier.")
-    p_plan.add_argument("--limit", type=int, default=None, help="Explicit context window token limit override.")
-    p_plan.add_argument("--used-tokens", type=int, default=0, help="Current session tokens already consumed.")
-    p_plan.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_plan.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_plan = sub.add_parser("plan-schedule", help="Plan token-safe batches, parallel waves, and context_graph.json.")
+    p_plan.add_argument("--tasks-json", default=None)
+    p_plan.add_argument("--tasks-file", default=None)
+    p_plan.add_argument("--objective", default=None)
+    p_plan.add_argument("--model", default=None)
+    p_plan.add_argument("--limit", type=int, default=None)
+    p_plan.add_argument("--used-tokens", type=int, default=0)
+    p_plan.add_argument("--workspace", default=".")
+    p_plan.add_argument("--json", action="store_true")
 
     # 3. auto-plan
-    p_auto = sub.add_parser("auto-plan", help="Auto-discover local code imports and generate a topological batch/wave schedule.")
-    p_auto.add_argument("--path", default=".", help="Subdirectory or file to analyze relative to workspace.")
-    p_auto.add_argument("--action", default="Audit and update", help="Action verb prefix for generated tasks.")
-    p_auto.add_argument("--objective", default=None, help="Immutable objective string.")
-    p_auto.add_argument("--output-per-file", type=int, default=1500, help="Expected output tokens per file task.")
-    p_auto.add_argument("--model", default=None, help="Active model identifier.")
-    p_auto.add_argument("--limit", type=int, default=None, help="Context limit override.")
-    p_auto.add_argument("--used-tokens", type=int, default=0, help="Current session tokens already consumed.")
-    p_auto.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_auto.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_auto = sub.add_parser("auto-plan", help="Auto-discover local code imports and build a topological schedule.")
+    p_auto.add_argument("--path", default=".")
+    p_auto.add_argument("--action", default="Audit and update")
+    p_auto.add_argument("--objective", default=None)
+    p_auto.add_argument("--output-per-file", type=int, default=1500)
+    p_auto.add_argument("--model", default=None)
+    p_auto.add_argument("--limit", type=int, default=None)
+    p_auto.add_argument("--used-tokens", type=int, default=0)
+    p_auto.add_argument("--workspace", default=".")
+    p_auto.add_argument("--json", action="store_true")
 
     # 4. gate-check
     p_gate = sub.add_parser("gate-check", help="Check whether starting a task stays within safe budget and lease locks.")
-    p_gate.add_argument("--task-id", required=True, help="Scheduled task ID to gate-check.")
-    p_gate.add_argument("--agent-id", default=None, help="Optional worker agent ID to check against active leases.")
-    p_gate.add_argument("--model", default=None, help="Active model identifier.")
-    p_gate.add_argument("--limit", type=int, default=None, help="Context limit override.")
-    p_gate.add_argument("--used-tokens", type=int, default=None, help="Current session tokens consumed.")
-    p_gate.add_argument("--transcript", default=None, help="Optional transcript path if --used-tokens is omitted.")
-    p_gate.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_gate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_gate.add_argument("--task-id", required=True)
+    p_gate.add_argument("--agent-id", default=None)
+    p_gate.add_argument("--model", default=None)
+    p_gate.add_argument("--limit", type=int, default=None)
+    p_gate.add_argument("--used-tokens", type=int, default=None)
+    p_gate.add_argument("--transcript", default=None)
+    p_gate.add_argument("--workspace", default=".")
+    p_gate.add_argument("--json", action="store_true")
 
     # 5. lease
-    p_lease = sub.add_parser("lease", help="Manage multi-agent task & file-conflict leases.")
+    p_lease = sub.add_parser("lease", help="Manage atomic multi-agent task & file-conflict leases.")
     p_lease.add_argument("--action", required=True, choices=["claim", "release", "complete", "status"])
-    p_lease.add_argument("--task-id", default=None, help="Task ID to claim/release/complete.")
-    p_lease.add_argument("--agent-id", default=None, help="Unique worker agent identifier.")
-    p_lease.add_argument("--files", action="append", nargs="+", default=None, help="Extra file paths to lock.")
-    p_lease.add_argument("--ttl-seconds", type=int, default=DEFAULT_LEASE_TTL_SECONDS, help="Lease expiration TTL.")
-    p_lease.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_lease.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_lease.add_argument("--task-id", default=None)
+    p_lease.add_argument("--agent-id", default=None)
+    p_lease.add_argument("--files", action="append", nargs="+", default=None)
+    p_lease.add_argument("--ttl-seconds", type=int, default=DEFAULT_LEASE_TTL_SECONDS)
+    p_lease.add_argument("--workspace", default=".")
+    p_lease.add_argument("--json", action="store_true")
 
-    # 6. record-decision
-    p_dec = sub.add_parser("record-decision", help="Record an immutable architectural decision / invariant into context_graph.json.")
-    p_dec.add_argument("--id", default=None, help="Optional ADR identifier (e.g. ADR-01).")
-    p_dec.add_argument("--decision", required=True, help="Architectural decision or invariant statement.")
-    p_dec.add_argument("--rationale", default="", help="Why this decision was made.")
-    p_dec.add_argument("--tasks", default="", help="Comma-separated related task IDs.")
-    p_dec.add_argument("--files", action="append", nargs="+", default=None, help="Related file paths.")
-    p_dec.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_dec.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 6. delegate
+    p_del = sub.add_parser("delegate", help="Generate a token-pruned specialist subagent brief, claim lease, and emit harness dispatch command.")
+    p_del.add_argument("--task-id", required=True)
+    p_del.add_argument("--role", default=None, choices=sorted(SPECIALIST_ROLES.keys()))
+    p_del.add_argument("--agent-id", default=None)
+    p_del.add_argument("--harness", default="claude", choices=sorted(HARNESS_DISPATCH_TEMPLATES.keys()))
+    p_del.add_argument("--token-budget", type=int, default=3500)
+    p_del.add_argument("--no-lease", action="store_true")
+    p_del.add_argument("--workspace", default=".")
+    p_del.add_argument("--json", action="store_true")
 
-    # 7. compress-output
-    p_cmp = sub.add_parser("compress-output", help="Compress noisy test logs, stack traces, or diffs to prevent context rot.")
-    p_cmp.add_argument("--file", default=None, help="Input file path (reads stdin if omitted).")
-    p_cmp.add_argument("--max-lines", type=int, default=80, help="Target max output lines (default: 80).")
-    p_cmp.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 7. memory (research notes + ongoing project facts)
+    p_mem = sub.add_parser("memory", help="Organize research findings and persistent project memory inside context_graph.json.")
+    p_mem.add_argument("--action", required=True, choices=["add", "query", "list"])
+    p_mem.add_argument("--kind", default="research", choices=["research", "fact", "risk", "all"])
+    p_mem.add_argument("--id", default=None)
+    p_mem.add_argument("--title", default=None)
+    p_mem.add_argument("--content", default=None)
+    p_mem.add_argument("--source", default="")
+    p_mem.add_argument("--tags", default="")
+    p_mem.add_argument("--tasks", default="")
+    p_mem.add_argument("--files", action="append", nargs="+", default=None)
+    p_mem.add_argument("--query", default="")
+    p_mem.add_argument("--limit", type=int, default=8)
+    p_mem.add_argument("--workspace", default=".")
+    p_mem.add_argument("--json", action="store_true")
 
-    # 8. verify-handoff
-    p_ver = sub.add_parser("verify-handoff", help="Run pre-handoff syntax, merge-conflict, and optional test verification gate.")
-    p_ver.add_argument("--files", action="append", nargs="+", default=None, help="Specific files to validate.")
-    p_ver.add_argument("--verify-cmd", default=None, help="Optional shell test/build command to run before handoff.")
-    p_ver.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_ver.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 8. record-decision
+    p_dec = sub.add_parser("record-decision", help="Record an immutable architectural decision / invariant.")
+    p_dec.add_argument("--id", default=None)
+    p_dec.add_argument("--decision", required=True)
+    p_dec.add_argument("--rationale", default="")
+    p_dec.add_argument("--tasks", default="")
+    p_dec.add_argument("--files", action="append", nargs="+", default=None)
+    p_dec.add_argument("--workspace", default=".")
+    p_dec.add_argument("--json", action="store_true")
 
-    # 9. save-worklog
+    # 9. discover-skills
+    p_sk = sub.add_parser("discover-skills", help="Metadata-only skill router across all installed CLI skill directories.")
+    p_sk.add_argument("--query", default="")
+    p_sk.add_argument("--dirs", action="append", nargs="+", default=None)
+    p_sk.add_argument("--limit", type=int, default=5)
+    p_sk.add_argument("--workspace", default=".")
+    p_sk.add_argument("--json", action="store_true")
+
+    # 10. compress-output
+    p_cmp = sub.add_parser("compress-output", help="Compress verbose test/build/diff logs to prevent context rot.")
+    p_cmp.add_argument("--file", default=None)
+    p_cmp.add_argument("--max-lines", type=int, default=80)
+    p_cmp.add_argument("--json", action="store_true")
+
+    # 11. exec-task
+    p_ex = sub.add_parser("exec-task", help="Execute code/tests for a task with auto-compressed logs and graph receipt.")
+    p_ex.add_argument("--task-id", default="ad-hoc")
+    p_ex.add_argument("--cmd", required=True)
+    p_ex.add_argument("--timeout", type=int, default=120)
+    p_ex.add_argument("--max-lines", type=int, default=60)
+    p_ex.add_argument("--workspace", default=".")
+    p_ex.add_argument("--json", action="store_true")
+
+    # 12. verify-handoff
+    p_ver = sub.add_parser("verify-handoff", help="Pre-handoff AST syntax, JSON, conflict-marker, and optional test gate.")
+    p_ver.add_argument("--files", action="append", nargs="+", default=None)
+    p_ver.add_argument("--verify-cmd", default=None)
+    p_ver.add_argument("--workspace", default=".")
+    p_ver.add_argument("--json", action="store_true")
+
+    # 13. save-worklog
     p_save = sub.add_parser("save-worklog", help="Persist canonical context_graph.json, WORKLOG.md with Mermaid DAG, and archives.")
-    p_save.add_argument("--objective", default=None, help="Immutable overarching objective.")
-    p_save.add_argument("--constraints-json", default=None, help="JSON array of immutable constraint strings.")
-    p_save.add_argument("--completed-json", default=None, help="JSON array of completed task records.")
-    p_save.add_argument("--failed-json", default=None, help="JSON array of failed attempt notes.")
-    p_save.add_argument("--resume-pointer", default=None, help="Exact file/line/task pointer for next session.")
-    p_save.add_argument("--model", default=None, help="Active model identifier.")
-    p_save.add_argument("--limit", type=int, default=None, help="Context limit override.")
-    p_save.add_argument("--used-tokens", type=int, default=0, help="Current session tokens consumed.")
-    p_save.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_save.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_save.add_argument("--objective", default=None)
+    p_save.add_argument("--constraints-json", default=None)
+    p_save.add_argument("--completed-json", default=None)
+    p_save.add_argument("--failed-json", default=None)
+    p_save.add_argument("--resume-pointer", default=None)
+    p_save.add_argument("--model", default=None)
+    p_save.add_argument("--limit", type=int, default=None)
+    p_save.add_argument("--used-tokens", type=int, default=0)
+    p_save.add_argument("--workspace", default=".")
+    p_save.add_argument("--json", action="store_true")
 
-    # 10. query-graph
-    p_qg = sub.add_parser("query-graph", help="Extract a token-budgeted ancestor/decision/file/dead-end subgraph.")
-    p_qg.add_argument("--task-id", default=None, help="Target task ID (or comma-separated IDs).")
-    p_qg.add_argument("--depth", type=int, default=2, help="Upstream dependency hop depth (default: 2).")
-    p_qg.add_argument("--token-budget", type=int, default=None, help="Hard max token budget for returned subgraph.")
-    p_qg.add_argument("--mermaid", action="store_true", help="Output Mermaid flowchart diagram.")
-    p_qg.add_argument("--dot", action="store_true", help="Output Graphviz DOT diagram.")
-    p_qg.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_qg.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 14. query-graph
+    p_qg = sub.add_parser("query-graph", help="Extract a token-budgeted ancestor/decision/memory/file subgraph.")
+    p_qg.add_argument("--task-id", default=None)
+    p_qg.add_argument("--depth", type=int, default=2)
+    p_qg.add_argument("--token-budget", type=int, default=None)
+    p_qg.add_argument("--mermaid", action="store_true")
+    p_qg.add_argument("--dot", action="store_true")
+    p_qg.add_argument("--workspace", default=".")
+    p_qg.add_argument("--json", action="store_true")
 
-    # 11. resume-context
-    p_res = sub.add_parser("resume-context", help="Load graph-pruned handoff context, decisions, leases, and git drift.")
-    p_res.add_argument("--token-budget", type=int, default=None, help="Optional hard max token cap for focused subgraph.")
-    p_res.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_res.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 15. resume-context
+    p_res = sub.add_parser("resume-context", help="Load graph-pruned handoff context, decisions, memory, leases, and git drift.")
+    p_res.add_argument("--token-budget", type=int, default=None)
+    p_res.add_argument("--workspace", default=".")
+    p_res.add_argument("--json", action="store_true")
 
-    # 12. status
-    p_st = sub.add_parser("status", help="Display one-screen context budget, graph, wave, and lease mission control.")
-    p_st.add_argument("--model", default=None, help="Active model identifier.")
-    p_st.add_argument("--limit", type=int, default=None, help="Context limit override.")
-    p_st.add_argument("--transcript", default=None, help="Optional transcript path.")
-    p_st.add_argument("--extra-tokens", type=int, default=0, help="Additional estimated tokens.")
-    p_st.add_argument("--workspace", default=".", help="Workspace root directory.")
-    p_st.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # 16. status
+    p_st = sub.add_parser("status", help="One-screen mission-control dashboard.")
+    p_st.add_argument("--model", default=None)
+    p_st.add_argument("--limit", type=int, default=None)
+    p_st.add_argument("--transcript", default=None)
+    p_st.add_argument("--extra-tokens", type=int, default=0)
+    p_st.add_argument("--workspace", default=".")
+    p_st.add_argument("--json", action="store_true")
 
     return parser
 
@@ -2476,8 +2828,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "auto-plan": cmd_auto_plan,
         "gate-check": cmd_gate_check,
         "lease": cmd_lease,
+        "delegate": cmd_delegate,
+        "memory": cmd_memory,
         "record-decision": cmd_record_decision,
+        "discover-skills": cmd_discover_skills,
         "compress-output": cmd_compress_output,
+        "exec-task": cmd_exec_task,
         "verify-handoff": cmd_verify_handoff,
         "save-worklog": cmd_save_worklog,
         "query-graph": cmd_query_graph,
