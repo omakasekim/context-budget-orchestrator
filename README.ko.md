@@ -38,7 +38,7 @@
 ## 1-명령 설치 및 진단
 
 ```bash
-git clone https://github.com/Aetherx86/context-budget-orchestrator.git
+git clone https://github.com/omakasekim/context-budget-orchestrator.git
 cd context-budget-orchestrator
 bash install.sh
 ```

@@ -38,7 +38,7 @@ Una **Agent Skill universal, sin dependencias externas y libre de sobrecarga**, 
 ## Instalación en 1 Comando
 
 ```bash
-git clone https://github.com/Aetherx86/context-budget-orchestrator.git
+git clone https://github.com/omakasekim/context-budget-orchestrator.git
 cd context-budget-orchestrator
 bash install.sh
 ```

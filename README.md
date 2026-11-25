@@ -42,7 +42,7 @@ Most GitHub orchestrator skills either bloat your system prompt with 600+ lines 
 ## 1-Command Installation
 
 ```bash
-git clone https://github.com/Aetherx86/context-budget-orchestrator.git
+git clone https://github.com/omakasekim/context-budget-orchestrator.git
 cd context-budget-orchestrator
 
 # macOS / Linux
